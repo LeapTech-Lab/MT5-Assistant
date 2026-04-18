@@ -16,6 +16,7 @@ AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.openai.com/v1")
 AI_API_KEY = os.getenv("AI_API_KEY", "")
 AI_MODEL = os.getenv("AI_MODEL", "gpt-4.1-mini")
 MAX_RISK_PERCENT = float(os.getenv("MAX_RISK_PERCENT", "1.0"))
+DEFAULT_AGENT_MODE = os.getenv("DEFAULT_AGENT_MODE", "user")
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -76,13 +77,19 @@ class ChatReq(BaseModel):
     symbol: str = "XAUUSD"
 
 
+class ModeUpdateReq(BaseModel):
+    mode: Literal["kernel", "user"]
+    reason: str = "manual switch"
+
+
 @dataclass
 class RuntimeState:
     last_snapshot: Snapshot | None = None
     next_command: TradeCommand = TradeCommand()
+    mode: Literal["kernel", "user"] = "user"
 
 
-runtime = RuntimeState()
+runtime = RuntimeState(mode="kernel" if DEFAULT_AGENT_MODE == "kernel" else "user")
 
 
 def _auth(x_api_key: str | None) -> None:
@@ -153,6 +160,7 @@ async def _call_ai(snapshot: Snapshot, user_message: str = "") -> TradeCommand:
         "If uncertain output action=none."
     )
     user_payload = {
+        "mode": runtime.mode,
         "snapshot": snapshot.model_dump(),
         "pattern": pattern,
         "style": style,
@@ -185,21 +193,53 @@ async def _call_ai(snapshot: Snapshot, user_message: str = "") -> TradeCommand:
     return _risk_guard(snapshot, parsed)
 
 
+def _persist_state() -> None:
+    snapshot_dump = runtime.last_snapshot.model_dump() if runtime.last_snapshot else None
+    state = {
+        "last_update": datetime.now(timezone.utc).isoformat(),
+        "mode": runtime.mode,
+        "snapshot": snapshot_dump,
+        "next_command": runtime.next_command.model_dump(),
+    }
+    _save_json(STATE_FILE, state)
+
+
+@app.post("/v1/agent/mode")
+async def set_mode(req: ModeUpdateReq, x_api_key: str | None = Header(default=None)):
+    _auth(x_api_key)
+    runtime.mode = req.mode
+    runtime.next_command = TradeCommand(action="none", reason=f"Switched to {req.mode} mode")
+
+    line = (
+        f"- {datetime.now(timezone.utc).isoformat()} mode_switch: "
+        f"{json.dumps(req.model_dump(), ensure_ascii=False)}\n"
+    )
+    with REVIEW_FILE.open("a", encoding="utf-8") as f:
+        f.write(line)
+
+    _persist_state()
+    return {"ok": True, "mode": runtime.mode}
+
+
+@app.get("/v1/agent/mode")
+async def get_mode(x_api_key: str | None = Header(default=None)):
+    _auth(x_api_key)
+    return {"mode": runtime.mode}
+
+
 @app.post("/v1/mt5/ingest")
 async def ingest(snapshot: Snapshot, x_api_key: str | None = Header(default=None)):
     _auth(x_api_key)
     runtime.last_snapshot = snapshot
 
-    cmd = await _call_ai(snapshot)
-    runtime.next_command = cmd
+    if runtime.mode == "kernel":
+        cmd = await _call_ai(snapshot)
+    else:
+        cmd = TradeCommand(action="none", reason="User mode: suggestions only, no auto-trading")
 
-    state = {
-        "last_update": datetime.now(timezone.utc).isoformat(),
-        "snapshot": snapshot.model_dump(),
-        "next_command": cmd.model_dump(),
-    }
-    _save_json(STATE_FILE, state)
-    return {"ok": True, "command": cmd}
+    runtime.next_command = cmd
+    _persist_state()
+    return {"ok": True, "mode": runtime.mode, "command": cmd}
 
 
 @app.get("/v1/mt5/next-command")
@@ -208,8 +248,12 @@ async def next_command(symbol: str, x_api_key: str | None = Header(default=None)
     if runtime.last_snapshot is None or runtime.last_snapshot.symbol != symbol:
         return TradeCommand(action="none", reason="No snapshot yet")
 
+    if runtime.mode != "kernel":
+        return TradeCommand(action="none", reason="User mode: command execution disabled")
+
     cmd = runtime.next_command
     runtime.next_command = TradeCommand(action="none", reason="Command consumed")
+    _persist_state()
     return cmd
 
 
@@ -217,7 +261,6 @@ async def next_command(symbol: str, x_api_key: str | None = Header(default=None)
 async def order_result(payload: dict, x_api_key: str | None = Header(default=None)):
     _auth(x_api_key)
     line = f"- {datetime.now(timezone.utc).isoformat()} result: {json.dumps(payload, ensure_ascii=False)}\n"
-    REVIEW_FILE.parent.mkdir(parents=True, exist_ok=True)
     with REVIEW_FILE.open("a", encoding="utf-8") as f:
         f.write(line)
     return {"ok": True}
@@ -231,12 +274,14 @@ async def chat(req: ChatReq):
 
     cmd = await _call_ai(snapshot, req.message)
     return {
+        "mode": runtime.mode,
         "answer": f"建议动作: {cmd.action}, 手数: {cmd.volume}, SL: {cmd.sl}, TP: {cmd.tp}, 原因: {cmd.reason}",
         "command": cmd,
+        "executable": runtime.mode == "kernel",
         "pattern": _candlestick_summary(snapshot.candles_m1),
     }
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "mode": runtime.mode}
