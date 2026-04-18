@@ -75,7 +75,14 @@ Python 侧支持三类：
 - `AI_API_KEY`
 - `AI_MODEL`
 
-示例：
+常用 `AI_MODEL` 示例：
+- OpenAI: `gpt-4.1-mini` / `gpt-4.1` / `o4-mini`
+- Claude: `claude-3-7-sonnet-latest` / `claude-3-5-sonnet-latest`
+- Gemini: `gemini-2.5-pro` / `gemini-2.5-flash`
+- DeepSeek(OpenAI兼容): `deepseek-chat` / `deepseek-reasoner`
+- Qwen(OpenAI兼容网关): `qwen-max` / `qwen-plus`
+
+示例（Claude 原生）：
 ```bash
 AI_PROVIDER=anthropic
 AI_BASE_URL=https://api.anthropic.com
@@ -83,11 +90,20 @@ AI_API_KEY=xxx
 AI_MODEL=claude-3-7-sonnet-latest
 ```
 
+示例（Gemini 原生）：
 ```bash
 AI_PROVIDER=gemini
 AI_BASE_URL=https://generativelanguage.googleapis.com
 AI_API_KEY=xxx
 AI_MODEL=gemini-2.5-pro
+```
+
+示例（DeepSeek OpenAI兼容）：
+```bash
+AI_PROVIDER=openai_compatible
+AI_BASE_URL=https://api.deepseek.com/v1
+AI_API_KEY=xxx
+AI_MODEL=deepseek-chat
 ```
 
 ## 5) 关于“K线形态怎么让 AI 知道”

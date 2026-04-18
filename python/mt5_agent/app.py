@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -90,7 +90,7 @@ class ModeUpdateReq(BaseModel):
 @dataclass
 class RuntimeState:
     last_snapshot: Snapshot | None = None
-    next_command: TradeCommand = TradeCommand()
+    next_command: TradeCommand = field(default_factory=TradeCommand)
     mode: Literal["kernel", "user"] = "user"
 
 
