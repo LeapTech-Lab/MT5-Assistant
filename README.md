@@ -4,11 +4,11 @@
 
 ## 已实现
 - MT5 EA 对外导出：Tick、K线、持仓。
-- Python Bridge 接收数据并接入 OpenAI 兼容 API。
+- Python Bridge 接收数据并接入多厂商 AI API。
 - 支持下单类型：
   - taker: `buy_market`, `sell_market`
   - maker: `buy_limit`, `sell_limit`, `buy_stop`, `sell_stop`
-- 权限模式（核心新增）：
+- 权限模式：
   - `kernel`（内核权限）：Agent 自动生成并下发交易指令，EA 可直接执行。
   - `user`（用户权限）：只给建议，不允许自动下单。
 - 风险守卫：
@@ -41,7 +41,7 @@ cp .env.example .env
 uvicorn mt5_agent.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-## 3) 权限模式切换（重点）
+## 3) 权限模式切换
 ### 查询当前模式
 ```bash
 curl -H "X-API-Key: change_me" http://127.0.0.1:8000/v1/agent/mode
@@ -63,13 +63,32 @@ curl -X POST http://127.0.0.1:8000/v1/agent/mode \
   -d '{"mode":"user","reason":"manual supervision"}'
 ```
 
-## 4) AI 接入（Claude/OpenAI/其他）
-该实现使用 **OpenAI 兼容 Chat Completions** 协议。你可以替换：
+## 4) AI 接入（支持多厂商）
+Python 侧支持三类：
+1. `openai_compatible`：兼容 OpenAI Chat Completions 的全系网关（OpenAI、DeepSeek、Qwen兼容网关、Moonshot兼容网关等）
+2. `anthropic`：原生 Claude Messages API
+3. `gemini`：原生 Google Gemini API
+
+在 `.env` 配置：
+- `AI_PROVIDER=openai_compatible|anthropic|gemini`
 - `AI_BASE_URL`
 - `AI_API_KEY`
 - `AI_MODEL`
 
-如果你的 Claude 网关提供 OpenAI 兼容层，可直接接入。
+示例：
+```bash
+AI_PROVIDER=anthropic
+AI_BASE_URL=https://api.anthropic.com
+AI_API_KEY=xxx
+AI_MODEL=claude-3-7-sonnet-latest
+```
+
+```bash
+AI_PROVIDER=gemini
+AI_BASE_URL=https://generativelanguage.googleapis.com
+AI_API_KEY=xxx
+AI_MODEL=gemini-2.5-pro
+```
 
 ## 5) 关于“K线形态怎么让 AI 知道”
 当前实现采用双输入：

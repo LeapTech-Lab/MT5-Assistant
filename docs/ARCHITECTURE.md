@@ -7,6 +7,7 @@
 - 强制风险守卫（止损止盈、最小手数、风险上限）。
 - 具备复盘记忆与交易风格学习入口。
 - 支持双权限模式：内核权限（自动下单）与用户权限（仅建议）。
+- 支持多厂商 AI API（OpenAI 兼容、Anthropic、Gemini）。
 
 ## 数据流
 1. `AgentBridgeEA.mq5` 每秒采集：
@@ -17,7 +18,7 @@
 3. Python 侧：
    - 计算 K 线形态特征（doji / engulfing / trend）
    - 拼接 Prompt（含仓位、形态、复盘记录、风格偏好）
-   - 调用 AI API 得出结构化指令
+   - 按 `AI_PROVIDER` 调用对应模型 API
    - 通过风险引擎过滤
 4. EA `GET /v1/mt5/next-command` 拉取可执行命令并下单（仅在 kernel 模式）。
 
@@ -30,6 +31,15 @@
   - `ingest` 不输出可执行命令。
   - `next-command` 永远返回 `action=none`。
   - 用户通过 `/v1/chat` 获取实时建议，人工决策执行。
+
+## 多厂商 API 适配
+- `openai_compatible`：适配所有 OpenAI Chat Completions 兼容网关。
+- `anthropic`：使用 `POST /v1/messages`。
+- `gemini`：使用 `models/{model}:generateContent`。
+
+统一输出规范：
+- 模型必须返回 `TradeCommand` JSON。
+- Bridge 会做 JSON 提取与结构校验，不合规则降级为 `action=none`。
 
 ## 模式控制接口
 - `GET /v1/agent/mode`：查询当前模式。

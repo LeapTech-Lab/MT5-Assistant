@@ -12,9 +12,14 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 API_KEY = os.getenv("BRIDGE_API_KEY", "change_me")
+AI_PROVIDER = os.getenv("AI_PROVIDER", "openai_compatible").lower()
 AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.openai.com/v1")
 AI_API_KEY = os.getenv("AI_API_KEY", "")
 AI_MODEL = os.getenv("AI_MODEL", "gpt-4.1-mini")
+AI_TIMEOUT_SECONDS = int(os.getenv("AI_TIMEOUT_SECONDS", "20"))
+OPENAI_PATH = os.getenv("OPENAI_PATH", "/chat/completions")
+ANTHROPIC_VERSION = os.getenv("ANTHROPIC_VERSION", "2023-06-01")
+GEMINI_PATH_TEMPLATE = os.getenv("GEMINI_PATH_TEMPLATE", "/v1beta/models/{model}:generateContent")
 MAX_RISK_PERCENT = float(os.getenv("MAX_RISK_PERCENT", "1.0"))
 DEFAULT_AGENT_MODE = os.getenv("DEFAULT_AGENT_MODE", "user")
 
@@ -147,50 +152,114 @@ def _risk_guard(snapshot: Snapshot, cmd: TradeCommand) -> TradeCommand:
     return cmd
 
 
-async def _call_ai(snapshot: Snapshot, user_message: str = "") -> TradeCommand:
-    if not AI_API_KEY:
-        return TradeCommand(action="none", reason="AI_API_KEY missing")
+def _extract_first_json_block(text: str) -> str:
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        return ""
+    return text[start : end + 1]
 
+
+def _normalize_trade_command(raw_text: str) -> TradeCommand:
+    cleaned = _extract_first_json_block(raw_text)
+    if not cleaned:
+        return TradeCommand(action="none", reason="Model output has no JSON command")
+
+    try:
+        return TradeCommand.model_validate_json(cleaned)
+    except Exception:
+        return TradeCommand(action="none", reason="Invalid command JSON from model")
+
+
+def _build_ai_payload(snapshot: Snapshot, user_message: str = "") -> dict:
     pattern = _candlestick_summary(snapshot.candles_m1)
     style = _load_json(STYLE_FILE, {"risk_preference": "conservative"})
-
-    system_prompt = (
-        "You are an execution-focused XAUUSD trading copilot. "
-        "Always provide strict SL/TP and obey risk controls. "
-        "If uncertain output action=none."
-    )
-    user_payload = {
+    return {
         "mode": runtime.mode,
         "snapshot": snapshot.model_dump(),
         "pattern": pattern,
         "style": style,
         "review_notes": REVIEW_FILE.read_text(encoding="utf-8") if REVIEW_FILE.exists() else "",
         "user_message": user_message,
+        "required_json_schema": TradeCommand.model_json_schema(),
     }
 
+
+async def _call_openai_compatible(client: httpx.AsyncClient, prompt_json: str) -> TradeCommand:
     body = {
         "model": AI_MODEL,
         "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+            {
+                "role": "system",
+                "content": "You are an execution-focused XAUUSD trading copilot. Reply only in JSON.",
+            },
+            {"role": "user", "content": prompt_json},
         ],
         "response_format": {
             "type": "json_schema",
-            "json_schema": {
-                "name": "trade_command",
-                "schema": TradeCommand.model_json_schema(),
-            },
+            "json_schema": {"name": "trade_command", "schema": TradeCommand.model_json_schema()},
         },
     }
 
     headers = {"Authorization": f"Bearer {AI_API_KEY}", "Content-Type": "application/json"}
-    async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.post(f"{AI_BASE_URL}/chat/completions", headers=headers, json=body)
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
+    resp = await client.post(f"{AI_BASE_URL.rstrip('/')}{OPENAI_PATH}", headers=headers, json=body)
+    resp.raise_for_status()
+    content = resp.json()["choices"][0]["message"]["content"]
+    return _normalize_trade_command(content)
 
-    parsed = TradeCommand.model_validate_json(content)
-    return _risk_guard(snapshot, parsed)
+
+async def _call_anthropic(client: httpx.AsyncClient, prompt_json: str) -> TradeCommand:
+    body = {
+        "model": AI_MODEL,
+        "max_tokens": 600,
+        "system": "You are an execution-focused XAUUSD trading copilot. Reply only in JSON.",
+        "messages": [{"role": "user", "content": prompt_json}],
+    }
+    headers = {
+        "x-api-key": AI_API_KEY,
+        "anthropic-version": ANTHROPIC_VERSION,
+        "Content-Type": "application/json",
+    }
+
+    resp = await client.post(f"{AI_BASE_URL.rstrip('/')}/v1/messages", headers=headers, json=body)
+    resp.raise_for_status()
+    blocks = resp.json().get("content", [])
+    text = "\n".join(block.get("text", "") for block in blocks if block.get("type") == "text")
+    return _normalize_trade_command(text)
+
+
+async def _call_gemini(client: httpx.AsyncClient, prompt_json: str) -> TradeCommand:
+    body = {
+        "contents": [{"role": "user", "parts": [{"text": prompt_json}]}],
+        "generationConfig": {"responseMimeType": "application/json"},
+    }
+    path = GEMINI_PATH_TEMPLATE.format(model=AI_MODEL)
+    url = f"{AI_BASE_URL.rstrip('/')}{path}?key={AI_API_KEY}"
+    resp = await client.post(url, json=body)
+    resp.raise_for_status()
+    candidates = resp.json().get("candidates", [])
+    parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
+    text = "\n".join(part.get("text", "") for part in parts)
+    return _normalize_trade_command(text)
+
+
+async def _call_ai(snapshot: Snapshot, user_message: str = "") -> TradeCommand:
+    if not AI_API_KEY:
+        return TradeCommand(action="none", reason="AI_API_KEY missing")
+
+    prompt_json = json.dumps(_build_ai_payload(snapshot, user_message), ensure_ascii=False)
+
+    async with httpx.AsyncClient(timeout=AI_TIMEOUT_SECONDS) as client:
+        if AI_PROVIDER in {"openai", "openai_compatible", "deepseek", "moonshot", "qwen", "siliconflow"}:
+            cmd = await _call_openai_compatible(client, prompt_json)
+        elif AI_PROVIDER == "anthropic":
+            cmd = await _call_anthropic(client, prompt_json)
+        elif AI_PROVIDER in {"gemini", "google"}:
+            cmd = await _call_gemini(client, prompt_json)
+        else:
+            return TradeCommand(action="none", reason=f"Unsupported AI_PROVIDER: {AI_PROVIDER}")
+
+    return _risk_guard(snapshot, cmd)
 
 
 def _persist_state() -> None:
@@ -279,9 +348,10 @@ async def chat(req: ChatReq):
         "command": cmd,
         "executable": runtime.mode == "kernel",
         "pattern": _candlestick_summary(snapshot.candles_m1),
+        "provider": AI_PROVIDER,
     }
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "mode": runtime.mode}
+    return {"status": "ok", "mode": runtime.mode, "provider": AI_PROVIDER}
