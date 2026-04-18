@@ -1,5 +1,5 @@
 ﻿#property strict
-#property version   "1.00"
+#property version   "1.01"
 #property description "Bridge MT5 data to external AI agent via HTTP"
 
 input string InpBridgeBaseUrl = "http://127.0.0.1:8000";
@@ -17,7 +17,7 @@ int OnInit()
 {
    EventSetTimer(InpTimerSeconds);
    g_headers = "Content-Type: application/json\r\nX-API-Key: " + InpApiKey + "\r\n";
-   Print("AgentBridgeEA initialized");
+   Print("AgentBridgeEA v1.01 initialized for symbol: ", InpSymbol);
    return(INIT_SUCCEEDED);
 }
 
@@ -64,11 +64,14 @@ string BuildSnapshotPayload(string symbol, int bars)
       return "";
    }
 
+   // 获取品种的小数位数，动态控制价格精度
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+
    MqlRates rates[];
    int copied = CopyRates(symbol, PERIOD_M1, 0, bars, rates);
    if(copied <= 0)
    {
-      Print("CopyRates failed for ", symbol);
+      Print("CopyRates failed for ", symbol, " - copied=", copied);
       return "";
    }
 
@@ -77,20 +80,29 @@ string BuildSnapshotPayload(string symbol, int bars)
    string candles = "[";
    for(int i = copied - 1; i >= 0; i--)
    {
-      candles += StringFormat("{\"time\":\"%s\",\"open\":%.2f,\"high\":%.2f,\"low\":%.2f,\"close\":%.2f,\"tick_volume\":%I64d}",
-                              TimeToString(rates[i].time, TIME_DATE|TIME_SECONDS),
-                              rates[i].open, rates[i].high, rates[i].low, rates[i].close, 
-                              rates[i].tick_volume);
+      // tick_volume 用 %d（整数），real_volume 用 %.8f 保留精度
+      candles += StringFormat(
+         "{\"time\":\"%s\",\"open\":%.*f,\"high\":%.*f,\"low\":%.*f,\"close\":%.*f,\"tick_volume\":%d,\"real_volume\":%.8f}",
+         TimeToString(rates[i].time, TIME_DATE|TIME_SECONDS),
+         digits, rates[i].open,
+         digits, rates[i].high,
+         digits, rates[i].low,
+         digits, rates[i].close,
+         (int)rates[i].tick_volume,
+         rates[i].real_volume
+      );
 
       if(i != 0) candles += ",";
    }
    candles += "]";
 
-   string positions = BuildPositionsJson(symbol);
+   string positions = BuildPositionsJson(symbol, digits);
 
    string payload = StringFormat(
-      "{\"symbol\":\"%s\",\"bid\":%.2f,\"ask\":%.2f,\"time\":\"%s\",\"positions\":%s,\"candles_m1\":%s}",
-      symbol, tick.bid, tick.ask,
+      "{\"symbol\":\"%s\",\"bid\":%.*f,\"ask\":%.*f,\"time\":\"%s\",\"positions\":%s,\"candles_m1\":%s}",
+      symbol,
+      digits, tick.bid,
+      digits, tick.ask,
       TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS),
       positions,
       candles
@@ -102,7 +114,7 @@ string BuildSnapshotPayload(string symbol, int bars)
 //+------------------------------------------------------------------+
 //| 构建持仓JSON                                                     |
 //+------------------------------------------------------------------+
-string BuildPositionsJson(string symbol)
+string BuildPositionsJson(string symbol, int digits)
 {
    string out = "[";
    bool first = true;
@@ -118,13 +130,13 @@ string BuildPositionsJson(string symbol)
       first = false;
 
       out += StringFormat(
-         "{\"ticket\":%I64u,\"type\":%d,\"volume\":%.2f,\"price_open\":%.2f,\"sl\":%.2f,\"tp\":%.2f,\"profit\":%.2f}",
+         "{\"ticket\":%I64u,\"type\":%d,\"volume\":%.2f,\"price_open\":%.*f,\"sl\":%.*f,\"tp\":%.*f,\"profit\":%.2f}",
          ticket,
          (int)PositionGetInteger(POSITION_TYPE),
          PositionGetDouble(POSITION_VOLUME),
-         PositionGetDouble(POSITION_PRICE_OPEN),
-         PositionGetDouble(POSITION_SL),
-         PositionGetDouble(POSITION_TP),
+         digits, PositionGetDouble(POSITION_PRICE_OPEN),
+         digits, PositionGetDouble(POSITION_SL),
+         digits, PositionGetDouble(POSITION_TP),
          PositionGetDouble(POSITION_PROFIT)
       );
    }
@@ -137,11 +149,10 @@ string BuildPositionsJson(string symbol)
 //+------------------------------------------------------------------+
 void ExecuteCommandIfAny(string raw)
 {
-   // 如果返回的是 none 则直接退出
    if(StringFind(raw, "\"action\":\"none\"") >= 0) return;
 
    string action = JsonExtract(raw, "action");
-   if(action == "") return;
+   if(action == "" || action == "none") return;
 
    double volume = StringToDouble(JsonExtract(raw, "volume"));
    double sl     = StringToDouble(JsonExtract(raw, "sl"));
@@ -155,13 +166,13 @@ void ExecuteCommandIfAny(string raw)
    ZeroMemory(req);
    ZeroMemory(res);
 
-   req.symbol     = InpSymbol;
-   req.volume     = volume;
-   req.sl         = sl;
-   req.tp         = tp;
-   req.deviation  = 20;
-   req.magic      = 808888;
-   req.type_filling = ORDER_FILLING_IOC;   // 建议加上
+   req.symbol       = InpSymbol;
+   req.volume       = volume;
+   req.sl           = sl;
+   req.tp           = tp;
+   req.deviation    = 20;
+   req.magic        = 808888;
+   req.type_filling = ORDER_FILLING_IOC;
 
    if(action == "buy_market")
    {
@@ -201,16 +212,20 @@ void ExecuteCommandIfAny(string raw)
    }
    else
    {
+      Print("Unknown action: ", action);
       return;
    }
 
    bool ok = OrderSend(req, res);
+   Print("OrderSend action=", action, " ok=", ok, " retcode=", res.retcode, " comment=", res.comment);
 
-   string result = StringFormat("{\"ok\":%s,\"retcode\":%d,\"comment\":\"%s\",\"action\":\"%s\"}",
-                                ok ? "true" : "false",
-                                res.retcode,
-                                res.comment,
-                                action);
+   string result = StringFormat(
+      "{\"ok\":%s,\"retcode\":%d,\"comment\":\"%s\",\"action\":\"%s\"}",
+      ok ? "true" : "false",
+      res.retcode,
+      res.comment,
+      action
+   );
 
    HttpPost("/v1/mt5/order-result", result);
 }
@@ -224,14 +239,23 @@ string HttpPost(string path, string body)
    string result_headers;
    uchar data[];
 
-   StringToCharArray(body, data, 0, WHOLE_ARRAY, CP_UTF8);
+   // ✅ 修复：使用 StringLen(body) 而非 WHOLE_ARRAY
+   // WHOLE_ARRAY 会把末尾的 \0 也放进 data，导致服务端收到非法 JSON -> 422
+   StringToCharArray(body, data, 0, StringLen(body), CP_UTF8);
 
    int code = WebRequest("POST", InpBridgeBaseUrl + path, g_headers, 5000, data, result, result_headers);
 
    if(code == -1)
    {
-      Print("WebRequest POST error: ", GetLastError());
+      int err = GetLastError();
+      Print("WebRequest POST error=", err, " path=", path);
+      // 错误 4014: 需要在工具->选项->Expert Advisors 中允许 URL
+      if(err == 4014) Print("请在 MT5 -> 工具 -> 选项 -> EA交易 中添加允许的URL: ", InpBridgeBaseUrl);
       return "";
+   }
+   if(code != 200)
+   {
+      Print("WebRequest POST HTTP ", code, " path=", path, " body_preview=", StringSubstr(CharArrayToString(result), 0, 200));
    }
    return CharArrayToString(result);
 }
@@ -243,13 +267,13 @@ string HttpGet(string path)
 {
    uchar result[];
    string result_headers;
-   uchar data[];   // GET 不需要 body
+   uchar data[];
 
    int code = WebRequest("GET", InpBridgeBaseUrl + path, g_headers, 5000, data, result, result_headers);
 
    if(code == -1)
    {
-      Print("WebRequest GET error: ", GetLastError());
+      Print("WebRequest GET error=", GetLastError(), " path=", path);
       return "";
    }
    return CharArrayToString(result);
@@ -266,29 +290,30 @@ string JsonExtract(string src, string key)
 
    int start = pos + StringLen(k);
 
-   // 跳过空格和引号
-   while(start < StringLen(src))
-   {
-      ushort c = StringGetCharacter(src, start);
-      if(c != ' ' && c != '"' && c != ':') break;
+   // 跳过空格
+   while(start < StringLen(src) && StringGetCharacter(src, start) == ' ')
       start++;
-   }
+
+   bool is_string = (StringGetCharacter(src, start) == '"');
+   if(is_string) start++; // 跳过开头的引号
 
    int end = start;
    while(end < StringLen(src))
    {
       ushort c = StringGetCharacter(src, end);
-      if(c == ',' || c == '}' || c == ']') break;
+      if(is_string)
+      {
+         if(c == '"') break; // 字符串值到结束引号为止
+      }
+      else
+      {
+         if(c == ',' || c == '}' || c == ']') break;
+      }
       end++;
    }
 
    string value = StringSubstr(src, start, end - start);
    StringTrimLeft(value);
    StringTrimRight(value);
-
-   // 去掉可能残留的引号（如果是字符串）
-   if(StringLen(value) >= 2 && StringGetCharacter(value,0)=='"' && StringGetCharacter(value,StringLen(value)-1)=='"')
-      value = StringSubstr(value, 1, StringLen(value)-2);
-
    return value;
 }

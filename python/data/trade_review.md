@@ -1,3 +1,21 @@
 - 2026-04-18T05:04:16.929105+00:00 mode_switch: {"mode": "kernel", "reason": "start autonomous execution"}
 - 2026-04-18T05:04:20.520115+00:00 mode_switch: {"mode": "user", "reason": "manual supervision"}
 - 2026-04-18T05:09:32.615005+00:00 mode_switch: {"mode": "user", "reason": "manual supervision"}
+- 2026-04-18T05:51:28.745820+00:00 mode_switch: {"mode": "kernel", "reason": "test"}
+- 2026-04-18T05:54:52.856105+00:00 mode_switch: {"mode": "kernel", "reason": "test"}
+- 2026-04-18T05:56:21.715205+00:00 mode_switch: {"mode": "kernel", "reason": "test"}
+- 2026-04-18T05:56:48.564953+00:00 result: {"ok": true, "retcode": 10009, "comment": "Request executed", "action": "buy_limit"}
+- 2026-04-18T05:57:08.719122+00:00 result: {"ok": true, "retcode": 10009, "comment": "Request executed", "action": "buy_limit"}
+- 2026-04-18T05:59:07.537382+00:00 mode_switch: {"mode": "kernel", "reason": "test"}
+- 2026-04-18T05:59:12.822151+00:00 result: {"ok": true, "retcode": 10009, "comment": "Request executed", "action": "buy_limit"}
+- 2026-04-18T05:59:27.104100+00:00 result: {"ok": true, "retcode": 10009, "comment": "Request executed", "action": "buy_limit"}
+- 2026-04-18T05:59:31.549483+00:00 result: {"ok": true, "retcode": 10009, "comment": "Request executed", "action": "buy_limit"}
+- 2026-04-18T05:59:43.758215+00:00 result: {"ok": true, "retcode": 10009, "comment": "Request executed", "action": "buy_limit"}
+- 2026-04-18T05:59:52.876420+00:00 result: {"ok": true, "retcode": 10009, "comment": "Request executed", "action": "buy_limit"}
+- 2026-04-18T06:00:03.357409+00:00 result: {"ok": true, "retcode": 10009, "comment": "Request executed", "action": "buy_limit"}
+- 2026-04-18T06:01:06.256642+00:00 result: {"ok": true, "retcode": 10009, "comment": "Request executed", "action": "buy_limit"}
+- 2026-04-18T06:01:15.674959+00:00 result: {"ok": true, "retcode": 10009, "comment": "Request executed", "action": "buy_limit"}
+- 2026-04-18T06:01:25.371607+00:00 result: {"ok": true, "retcode": 10009, "comment": "Request executed", "action": "buy_limit"}
+- 2026-04-18T06:02:17.928114+00:00 result: {"ok": true, "retcode": 10009, "comment": "Request executed", "action": "buy_limit"}
+- 2026-04-18T06:02:28.864606+00:00 result: {"ok": true, "retcode": 10009, "comment": "Request executed", "action": "buy_limit"}
+- 2026-04-18T06:02:39.445732+00:00 result: {"ok": true, "retcode": 10009, "comment": "Request executed", "action": "buy_limit"}
