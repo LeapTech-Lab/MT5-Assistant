@@ -1,0 +1,13 @@
+{
+  "last_update": "2026-04-18T05:09:32.615344+00:00",
+  "mode": "user",
+  "snapshot": null,
+  "next_command": {
+    "action": "none",
+    "volume": 0.01,
+    "sl": 0.0,
+    "tp": 0.0,
+    "price": 0.0,
+    "reason": "Switched to user mode"
+  }
+}

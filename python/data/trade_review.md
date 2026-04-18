@@ -1,0 +1,3 @@
+- 2026-04-18T05:04:16.929105+00:00 mode_switch: {"mode": "kernel", "reason": "start autonomous execution"}
+- 2026-04-18T05:04:20.520115+00:00 mode_switch: {"mode": "user", "reason": "manual supervision"}
+- 2026-04-18T05:09:32.615005+00:00 mode_switch: {"mode": "user", "reason": "manual supervision"}
