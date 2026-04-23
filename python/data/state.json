@@ -1,13 +1,13 @@
 {
-  "last_update": "2026-04-23T09:37:27.168086+00:00",
-  "mode": "kernel",
+  "last_update": "2026-04-23T09:42:09.612039+00:00",
+  "mode": "user",
   "next_command": {
     "action": "none",
     "volume": 0.01,
     "sl": 0.0,
     "tp": 0.0,
     "price": 0.0,
-    "reason": "Command consumed"
+    "reason": "User mode: no auto-trading"
   },
   "last_symbol": "XAUUSD"
 }
