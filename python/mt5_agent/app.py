@@ -40,6 +40,8 @@ GEMINI_PROXY_URL     = os.getenv("GEMINI_PROXY_URL", "").strip()
 MAX_RISK_PERCENT     = float(os.getenv("MAX_RISK_PERCENT", "1.0"))
 DEFAULT_AGENT_MODE   = os.getenv("DEFAULT_AGENT_MODE", "user")
 AI_CALL_MIN_INTERVAL = float(os.getenv("AI_CALL_MIN_INTERVAL", "10"))
+AI_FORCE_INTERVAL    = float(os.getenv("AI_FORCE_INTERVAL", "60"))
+AI_TRIGGER_PRICE_BPS = float(os.getenv("AI_TRIGGER_PRICE_BPS", "1.5"))
 
 # 历史交易最多回传给AI的条数
 TRADE_HISTORY_FOR_AI = int(os.getenv("TRADE_HISTORY_FOR_AI", "20"))
@@ -400,6 +402,40 @@ def _build_ai_payload(snapshot: Snapshot, user_message: str = "") -> dict:
     }
 
 
+def _to_bool(v: str | None) -> bool:
+    return str(v or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _should_call_ai(current: Snapshot, previous: Snapshot | None) -> tuple[bool, str]:
+    """在节省 token 与实时性之间做平衡的触发器。"""
+    now = time.time()
+    elapsed = now - _last_ai_call_time
+
+    if previous is None:
+        return True, "first snapshot"
+    if elapsed >= AI_FORCE_INTERVAL:
+        return True, f"force interval reached ({elapsed:.1f}s)"
+    if elapsed < AI_CALL_MIN_INTERVAL:
+        return False, f"min interval guard ({elapsed:.1f}s<{AI_CALL_MIN_INTERVAL:.1f}s)"
+
+    prev_ts = previous.candles_m1[-1].ts if previous.candles_m1 else ""
+    curr_ts = current.candles_m1[-1].ts if current.candles_m1 else ""
+    if curr_ts and curr_ts != prev_ts:
+        return True, "new M1 candle"
+
+    prev_mid = (previous.bid + previous.ask) / 2 if (previous.bid > 0 and previous.ask > 0) else 0.0
+    curr_mid = (current.bid + current.ask) / 2 if (current.bid > 0 and current.ask > 0) else 0.0
+    if prev_mid > 0 and curr_mid > 0:
+        move_bps = abs(curr_mid - prev_mid) / prev_mid * 10000
+        if move_bps >= AI_TRIGGER_PRICE_BPS:
+            return True, f"price move {move_bps:.2f} bps"
+
+    if len(current.positions) != len(previous.positions):
+        return True, "position count changed"
+
+    return False, "no meaningful market change"
+
+
 # ─────────────────────────────────────────────────────────────
 # AI Provider Calls
 # ─────────────────────────────────────────────────────────────
@@ -450,7 +486,11 @@ def _call_gemini_sync(prompt_json: str) -> TradeCommand:
             async_client_args={"transport": httpx.AsyncHTTPTransport(proxy=GEMINI_PROXY_URL)},
         )
 
-    client = genai.Client(api_key=AI_API_KEY, http_options=http_options)
+    use_vertex = _to_bool(os.getenv("GOOGLE_GENAI_USE_VERTEXAI"))
+    if use_vertex:
+        client = genai.Client(http_options=http_options)
+    else:
+        client = genai.Client(api_key=AI_API_KEY, http_options=http_options)
     response = client.models.generate_content(
         model=AI_MODEL,
         contents=prompt_json,
@@ -535,6 +575,7 @@ async def get_mode(x_api_key: str | None = Header(default=None)):
 @app.post("/v1/mt5/ingest")
 async def ingest(snapshot: Snapshot, x_api_key: str | None = Header(default=None)):
     _auth(x_api_key)
+    previous_snapshot = runtime.last_snapshot
     runtime.last_snapshot = snapshot
 
     logger.info(
@@ -546,11 +587,16 @@ async def ingest(snapshot: Snapshot, x_api_key: str | None = Header(default=None
     )
 
     if runtime.mode == "kernel":
-        cmd = await _call_ai(snapshot)
+        should_call, reason = _should_call_ai(snapshot, previous_snapshot)
+        if should_call:
+            cmd = await _call_ai(snapshot)
+            runtime.next_command = cmd
+        else:
+            cmd = TradeCommand(action="none", reason=f"AI skipped: {reason}")
     else:
         cmd = TradeCommand(action="none", reason="User mode: no auto-trading")
+        runtime.next_command = cmd
 
-    runtime.next_command = cmd
     _persist_state()
     return {"ok": True, "mode": runtime.mode, "command": cmd}
 

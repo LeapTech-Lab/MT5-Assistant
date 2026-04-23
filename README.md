@@ -74,6 +74,9 @@ Python 侧支持三类：
 - `AI_BASE_URL`
 - `AI_API_KEY`
 - `AI_MODEL`
+- `AI_CALL_MIN_INTERVAL`（最小调用间隔，默认 10 秒）
+- `AI_FORCE_INTERVAL`（最长强制调用间隔，默认 60 秒）
+- `AI_TRIGGER_PRICE_BPS`（价格触发阈值，默认 1.5 bps）
 
 常用 `AI_MODEL` 示例：
 - OpenAI: `gpt-4.1-mini` / `gpt-4.1` / `o4-mini`
@@ -106,6 +109,8 @@ export GOOGLE_CLOUD_LOCATION=global
 export GOOGLE_GENAI_USE_VERTEXAI=True
 ```
 
+> 注意：当 `GOOGLE_GENAI_USE_VERTEXAI=True` 时，建议留空 `AI_API_KEY`，避免 SDK 优先走 API key 鉴权。
+
 示例（DeepSeek OpenAI兼容）：
 ```bash
 AI_PROVIDER=openai_compatible
@@ -121,12 +126,24 @@ AI_MODEL=deepseek-chat
 
 建议后续扩展到 M5/M15/H1，形成多周期共振特征。
 
-## 6) 风险声明
+## 6) 为什么开了 kernel 还“不下单”
+常见原因：
+- 命中节流：`AI_CALL_MIN_INTERVAL` 内会跳过 AI，避免高频耗 token。
+- 市场变化不明显：未出现新 M1、价格波动不足（`AI_TRIGGER_PRICE_BPS`）时会跳过。
+- 风险守卫拒绝：无 SL/TP、风险超阈值会被降级为 `action=none`。
+- 鉴权冲突：Vertex 模式下若填了 `AI_API_KEY`，可能优先走 key 而非项目/区域凭据。
+
+建议参数（兼顾实时与成本）：
+- `AI_CALL_MIN_INTERVAL=3~5`
+- `AI_FORCE_INTERVAL=20~30`
+- `AI_TRIGGER_PRICE_BPS=0.8~1.2`
+
+## 7) 风险声明
 - “永不爆仓”无法被任何系统绝对保证。
 - 本项目通过风险规则显著降低风险，但不能承诺收益。
 - 请务必先在模拟盘回测与前向验证。
 
-## 7) 下一步建议
+## 8) 下一步建议
 - 加入新闻上下文 Adapter（宏观事件对黄金影响）。
 - 引入回测引擎与绩效报表。
 - 增加风格学习器（根据你的历史订单动态调参）。
