@@ -46,6 +46,9 @@ AI_TRIGGER_PRICE_BPS = float(os.getenv("AI_TRIGGER_PRICE_BPS", "1.5"))
 REVIEW_EVERY_N_TRADES = int(os.getenv("REVIEW_EVERY_N_TRADES", "10"))
 RISK_CONTRACT_MULTIPLIER = float(os.getenv("RISK_CONTRACT_MULTIPLIER", "1.0"))
 LAB_MIN_BACKTEST_TRADES = int(os.getenv("LAB_MIN_BACKTEST_TRADES", "15"))
+CLOSE_ALL_MIN_HOLD_SECONDS = int(os.getenv("CLOSE_ALL_MIN_HOLD_SECONDS", "120"))
+CLOSE_ALL_MIN_TF_INVALIDATIONS = int(os.getenv("CLOSE_ALL_MIN_TF_INVALIDATIONS", "2"))
+CLOSE_ALL_FORCE_LOSS = float(os.getenv("CLOSE_ALL_FORCE_LOSS", "-25"))
 
 # 历史交易最多回传给AI的条数
 TRADE_HISTORY_FOR_AI = int(os.getenv("TRADE_HISTORY_FOR_AI", "20"))
@@ -500,7 +503,7 @@ def _risk_guard(snapshot: Snapshot, cmd: TradeCommand) -> TradeCommand:
     if cmd.action == "none":
         return cmd
     if cmd.action == "close_all":
-        return cmd
+        return _close_all_noise_guard(snapshot, cmd)
     if cmd.action == "modify_all_sl_tp":
         if cmd.sl <= 0 or cmd.tp <= 0:
             return TradeCommand(action="none", reason="modify_all_sl_tp requires SL/TP")
@@ -534,6 +537,72 @@ def _extract_first_json_block(text: str) -> str:
     if start < 0 or end <= start:
         return ""
     return text[start: end + 1]
+
+
+def _position_direction(snapshot: Snapshot) -> str:
+    if not snapshot.positions:
+        return "none"
+    types = {p.type for p in snapshot.positions}
+    if types == {0}:
+        return "buy"
+    if types == {1}:
+        return "sell"
+    return "mixed"
+
+
+def _latest_open_trade_age_seconds(symbol: str) -> float | None:
+    trades = _load_recent_trades(500)
+    open_actions = {"buy_market", "sell_market", "buy_limit", "sell_limit", "buy_stop", "sell_stop"}
+    for t in reversed(trades):
+        if t.get("symbol") != symbol:
+            continue
+        if t.get("action") in open_actions:
+            ts = t.get("ts")
+            if not ts:
+                return None
+            try:
+                dt = datetime.fromisoformat(ts)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return (datetime.now(timezone.utc) - dt).total_seconds()
+            except Exception:
+                return None
+    return None
+
+
+def _close_all_noise_guard(snapshot: Snapshot, cmd: TradeCommand) -> TradeCommand:
+    if not snapshot.positions:
+        return TradeCommand(action="none", reason="close_all rejected: no open positions")
+
+    total_profit = sum(p.profit for p in snapshot.positions)
+    if total_profit <= CLOSE_ALL_FORCE_LOSS:
+        return cmd
+
+    age = _latest_open_trade_age_seconds(snapshot.symbol)
+    if age is not None and age < CLOSE_ALL_MIN_HOLD_SECONDS:
+        return TradeCommand(
+            action="none",
+            reason=f"close_all rejected: hold<{CLOSE_ALL_MIN_HOLD_SECONDS}s anti-noise guard",
+        )
+
+    direction = _position_direction(snapshot)
+    if direction == "mixed":
+        return cmd
+
+    mtf = _multi_tf_analysis(snapshot)
+    if direction == "buy":
+        invalidations = sum(1 for tf in ("m5", "m15", "h1") if mtf[tf].get("trend") == "down")
+    elif direction == "sell":
+        invalidations = sum(1 for tf in ("m5", "m15", "h1") if mtf[tf].get("trend") == "up")
+    else:
+        invalidations = 0
+
+    if invalidations < CLOSE_ALL_MIN_TF_INVALIDATIONS:
+        return TradeCommand(
+            action="none",
+            reason=f"close_all rejected: invalidations<{CLOSE_ALL_MIN_TF_INVALIDATIONS} (ignore M1 noise)",
+        )
+    return cmd
 
 
 def _normalize_trade_command(raw_text: str) -> TradeCommand:
@@ -593,6 +662,7 @@ def _build_ai_payload(snapshot: Snapshot, user_message: str = "") -> dict:
             "and keep testing non-promoted candidates with small risk. "
             "On EVERY call, you must scan all existing positions first. "
             "If positions are open, prioritize position management: "
+            "DO NOT close positions based on M1 noise alone; require higher-timeframe invalidation (M5/M15/H1) before close_all unless severe loss. "
             "you may return modify_all_sl_tp to dynamically adjust stop-loss/take-profit, "
             "or close_all when risk becomes unclear or market invalidates the thesis. "
             "Review the trade history to learn from past wins and losses. "
@@ -775,21 +845,6 @@ def _call_gemini_sync(prompt_json: str) -> TradeCommand:
 async def _call_gemini(_client: httpx.AsyncClient, prompt_json: str) -> TradeCommand:
     return await asyncio.to_thread(_call_gemini_sync, prompt_json)
 
-    use_vertex = _to_bool(os.getenv("GOOGLE_GENAI_USE_VERTEXAI"))
-    if use_vertex:
-        client = genai.Client(http_options=http_options)
-    else:
-        client = genai.Client(api_key=AI_API_KEY, http_options=http_options)
-    response = client.models.generate_content(
-        model=AI_MODEL,
-        contents=prompt_json,
-        config=genai_types.GenerateContentConfig(response_mime_type="application/json"),
-    )
-    return _normalize_trade_command(response.text or "")
-
-
-async def _call_gemini(_client: httpx.AsyncClient, prompt_json: str) -> TradeCommand:
-    return await asyncio.to_thread(_call_gemini_sync, prompt_json)
 
 async def _call_ai(snapshot: Snapshot, user_message: str = "", force_call: bool = False) -> TradeCommand:
     global _last_ai_call_time

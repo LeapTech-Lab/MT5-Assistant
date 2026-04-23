@@ -268,6 +268,11 @@ curl -H "X-API-Key: change_me" \
 默认阈值参数：
 - `LAB_MIN_BACKTEST_TRADES=15`
 
+抗 M1 噪声提前平仓参数（推荐保留默认）：
+- `CLOSE_ALL_MIN_HOLD_SECONDS=120`：开仓后最短持仓秒数，防止刚开仓就被短周期波动洗掉
+- `CLOSE_ALL_MIN_TF_INVALIDATIONS=2`：`close_all` 需要 M5/M15/H1 至少 2 个周期反向确认
+- `CLOSE_ALL_FORCE_LOSS=-25`：若浮亏超过该值，允许无视上面条件直接风控平仓
+
 接口：
 ```bash
 # 主动运行一次策略实验室
