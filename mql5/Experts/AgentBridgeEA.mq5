@@ -116,6 +116,7 @@ void ExecuteCommandIfAny(string raw)
    if(StringFind(raw, "\"action\":\"none\"") >= 0) return;
    string action = JsonExtract(raw, "action");
    if(action == "" || action == "none") return;
+   string reason = JsonExtract(raw, "reason");
 
    double volume = StringToDouble(JsonExtract(raw, "volume"));
    double sl     = StringToDouble(JsonExtract(raw, "sl"));
@@ -129,8 +130,8 @@ void ExecuteCommandIfAny(string raw)
       Print("Position manage action=close_all ok=", ok_all);
       string result_close = StringFormat(
          "{\"ok\":%s,\"retcode\":0,\"comment\":\"close_all\",\"action\":\"%s\",\"volume\":0,"
-         "\"sl\":0,\"tp\":0,\"exec_price\":0,\"ticket\":0}",
-         ok_all?"true":"false", action
+         "\"sl\":0,\"tp\":0,\"exec_price\":0,\"ticket\":0,\"reason\":\"%s\"}",
+         ok_all?"true":"false", action, reason
       );
       HttpPost("/v1/mt5/order-result", result_close);
       return;
@@ -142,8 +143,8 @@ void ExecuteCommandIfAny(string raw)
       int digits_mod = (int)SymbolInfoInteger(InpSymbol, SYMBOL_DIGITS);
       string result_mod = StringFormat(
          "{\"ok\":%s,\"retcode\":0,\"comment\":\"modify_all_sl_tp\",\"action\":\"%s\",\"volume\":0,"
-         "\"sl\":%.*f,\"tp\":%.*f,\"exec_price\":0,\"ticket\":0}",
-         ok_mod?"true":"false", action, digits_mod, sl, digits_mod, tp
+         "\"sl\":%.*f,\"tp\":%.*f,\"exec_price\":0,\"ticket\":0,\"reason\":\"%s\"}",
+         ok_mod?"true":"false", action, digits_mod, sl, digits_mod, tp, reason
       );
       HttpPost("/v1/mt5/order-result", result_mod);
       return;
@@ -171,9 +172,9 @@ void ExecuteCommandIfAny(string raw)
    string result = StringFormat(
       "{\"ok\":%s,\"retcode\":%d,\"comment\":\"%s\","
       "\"action\":\"%s\",\"volume\":%.2f,"
-      "\"sl\":%.*f,\"tp\":%.*f,\"exec_price\":%.*f,\"ticket\":%I64u}",
+      "\"sl\":%.*f,\"tp\":%.*f,\"exec_price\":%.*f,\"ticket\":%I64u,\"reason\":\"%s\"}",
       ok?"true":"false", res.retcode, res.comment,
-      action, volume, digits, sl, digits, tp, digits, res.price, res.deal
+      action, volume, digits, sl, digits, tp, digits, res.price, res.deal, reason
    );
    HttpPost("/v1/mt5/order-result", result);
 }

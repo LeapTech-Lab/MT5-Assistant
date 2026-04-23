@@ -42,6 +42,7 @@ DEFAULT_AGENT_MODE   = os.getenv("DEFAULT_AGENT_MODE", "user")
 AI_CALL_MIN_INTERVAL = float(os.getenv("AI_CALL_MIN_INTERVAL", "10"))
 AI_FORCE_INTERVAL    = float(os.getenv("AI_FORCE_INTERVAL", "60"))
 AI_TRIGGER_PRICE_BPS = float(os.getenv("AI_TRIGGER_PRICE_BPS", "1.5"))
+REVIEW_EVERY_N_TRADES = int(os.getenv("REVIEW_EVERY_N_TRADES", "10"))
 
 # 历史交易最多回传给AI的条数
 TRADE_HISTORY_FOR_AI = int(os.getenv("TRADE_HISTORY_FOR_AI", "20"))
@@ -50,6 +51,7 @@ DATA_DIR     = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE   = DATA_DIR / "state.json"
 STYLE_FILE   = DATA_DIR / "style_profile.json"
+STRATEGY_FILE = DATA_DIR / "strategy_playbook.json"
 # 结构化交易历史（JSONL，每行一条）
 TRADE_LOG    = DATA_DIR / "trade_history.jsonl"
 # 旧的 review 文件保留兼容
@@ -189,6 +191,7 @@ class TradeRecord(BaseModel):
     ok:         bool
     retcode:    int
     comment:    str
+    decision_reason: Optional[str] = None
     # 平仓后由外部更新（可选）
     close_price: Optional[float] = None
     profit:      Optional[float] = None
@@ -240,6 +243,25 @@ def _append_trade_record(record: TradeRecord) -> None:
         f.write(record.model_dump_json() + "\n")
 
 
+def _load_strategy_playbook() -> dict:
+    default = {
+        "version": 1,
+        "last_review_trade_count": 0,
+        "parameters": {
+            "sl_buffer_factor": 1.0,
+            "tp_factor": 1.5,
+            "risk_mode": "conservative",
+        },
+        "rules": [],
+        "notes": [],
+    }
+    return _load_json(STRATEGY_FILE, default)
+
+
+def _save_strategy_playbook(playbook: dict) -> None:
+    _save_json(STRATEGY_FILE, playbook)
+
+
 def _load_recent_trades(n: int = TRADE_HISTORY_FOR_AI) -> list[dict]:
     """读取最近 n 条交易记录（从文件尾部）"""
     if not TRADE_LOG.exists():
@@ -271,6 +293,89 @@ def _trade_summary(trades: list[dict]) -> dict:
         "avg_pnl":    round(sum(profits) / len(profits), 2) if profits else None,
         "last_3":     trades[-3:],   # 最近3笔详情
     }
+
+
+def _extract_reason_tag(reason: str | None) -> str:
+    text = (reason or "").lower()
+    if "trend" in text:
+        return "trend_follow"
+    if "breakout" in text:
+        return "breakout"
+    if "reversal" in text:
+        return "reversal"
+    if "mean" in text:
+        return "mean_reversion"
+    return "unspecified"
+
+
+def _review_and_update_strategy() -> dict:
+    trades = _load_recent_trades(500)
+    playbook = _load_strategy_playbook()
+    total = len(trades)
+    if total == 0:
+        return {"reviewed": False, "reason": "no trades"}
+    if total - int(playbook.get("last_review_trade_count", 0)) < REVIEW_EVERY_N_TRADES:
+        return {"reviewed": False, "reason": "review interval not reached", "total": total}
+
+    closed = [t for t in trades if t.get("outcome") in {"win", "loss"}]
+    wins = [t for t in closed if t.get("outcome") == "win"]
+    losses = [t for t in closed if t.get("outcome") == "loss"]
+    by_action: dict[str, dict[str, int]] = {}
+    by_reason: dict[str, dict[str, int]] = {}
+    for t in closed:
+        action = str(t.get("action", "unknown"))
+        reason_tag = _extract_reason_tag(t.get("decision_reason"))
+        by_action.setdefault(action, {"win": 0, "loss": 0})
+        by_reason.setdefault(reason_tag, {"win": 0, "loss": 0})
+        if t.get("outcome") == "win":
+            by_action[action]["win"] += 1
+            by_reason[reason_tag]["win"] += 1
+        else:
+            by_action[action]["loss"] += 1
+            by_reason[reason_tag]["loss"] += 1
+
+    params = playbook.get("parameters", {})
+    sl_buffer = float(params.get("sl_buffer_factor", 1.0))
+    tp_factor = float(params.get("tp_factor", 1.5))
+    risk_mode = str(params.get("risk_mode", "conservative"))
+    new_rules = []
+
+    buy_losses = by_action.get("buy_market", {}).get("loss", 0) + by_action.get("buy_limit", {}).get("loss", 0)
+    buy_wins = by_action.get("buy_market", {}).get("win", 0) + by_action.get("buy_limit", {}).get("win", 0)
+    if buy_losses >= 3 and buy_losses > buy_wins:
+        sl_buffer = min(2.0, round(sl_buffer + 0.1, 2))
+        risk_mode = "defensive"
+        new_rules.append("做多近期止损偏多：增大SL缓冲（sl_buffer_factor +0.1），并降低追涨频率。")
+
+    trend_stats = by_reason.get("trend_follow", {"win": 0, "loss": 0})
+    if trend_stats["loss"] >= 3 and trend_stats["loss"] > trend_stats["win"]:
+        tp_factor = max(1.0, round(tp_factor - 0.1, 2))
+        new_rules.append("趋势跟随胜率下降：缩短止盈目标（tp_factor -0.1），优先保本。")
+
+    if len(losses) >= 2 and len(wins) == 0:
+        risk_mode = "minimal"
+        new_rules.append("连续亏损期：仅在H1与M15同向且M5确认时开仓，其他时段以管理仓位为主。")
+
+    playbook["parameters"] = {
+        "sl_buffer_factor": sl_buffer,
+        "tp_factor": tp_factor,
+        "risk_mode": risk_mode,
+    }
+    existing_rules = playbook.get("rules", [])
+    playbook["rules"] = (existing_rules + new_rules)[-50:]
+    note = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "total_closed": len(closed),
+        "wins": len(wins),
+        "losses": len(losses),
+        "by_action": by_action,
+        "by_reason": by_reason,
+        "new_rules_count": len(new_rules),
+    }
+    playbook["notes"] = (playbook.get("notes", []) + [note])[-100:]
+    playbook["last_review_trade_count"] = total
+    _save_strategy_playbook(playbook)
+    return {"reviewed": True, "new_rules_count": len(new_rules), "parameters": playbook["parameters"]}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -371,6 +476,7 @@ def _build_ai_payload(snapshot: Snapshot, user_message: str = "") -> dict:
     trade_stats   = _trade_summary(recent_trades)
     mtf           = _multi_tf_analysis(snapshot)
     style         = _load_json(STYLE_FILE, {"risk_preference": "conservative"})
+    strategy      = _load_strategy_playbook()
 
     return {
         "mode":     runtime.mode,
@@ -396,6 +502,7 @@ def _build_ai_payload(snapshot: Snapshot, user_message: str = "") -> dict:
         },
 
         "style":        style,
+        "strategy_playbook": strategy,
         "user_message": user_message,
 
         "instructions": (
@@ -696,11 +803,13 @@ async def order_result(payload: dict, x_api_key: str | None = Header(default=Non
         ok          = bool(payload.get("ok", False)),
         retcode     = int(payload.get("retcode", 0)),
         comment     = str(payload.get("comment", "")),
+        decision_reason = payload.get("reason"),
     )
     _append_trade_record(record)
+    review = _review_and_update_strategy()
     logger.info("Trade recorded | action=%s ok=%s ticket=%d price=%.2f",
                 record.action, record.ok, record.ticket, record.exec_price)
-    return {"ok": True}
+    return {"ok": True, "strategy_review": review}
 
 
 @app.post("/v1/mt5/close-result")
@@ -744,6 +853,12 @@ async def get_trade_history(n: int = 50, x_api_key: str | None = Header(default=
     _auth(x_api_key)
     trades = _load_recent_trades(n)
     return {"total": len(trades), "summary": _trade_summary(trades), "trades": trades}
+
+
+@app.get("/v1/strategy/playbook")
+async def get_strategy_playbook(x_api_key: str | None = Header(default=None)):
+    _auth(x_api_key)
+    return _load_strategy_playbook()
 
 
 @app.post("/v1/chat")
