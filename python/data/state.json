@@ -1,13 +1,13 @@
 {
-  "last_update": "2026-04-23T09:42:09.612039+00:00",
-  "mode": "user",
+  "last_update": "2026-04-23T09:59:18.390885+00:00",
+  "mode": "kernel",
   "next_command": {
     "action": "none",
     "volume": 0.01,
     "sl": 0.0,
     "tp": 0.0,
     "price": 0.0,
-    "reason": "User mode: no auto-trading"
+    "reason": "AI call exception: ClientError"
   },
   "last_symbol": "XAUUSD"
 }
