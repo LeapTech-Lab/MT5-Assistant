@@ -237,3 +237,19 @@ curl -H "X-API-Key: change_me" "http://127.0.0.1:8000/v1/strategy/playbook"
 ```
 
 > 注意：该复盘模块是“策略优化器”，不能保证稳定盈利；建议持续结合回测与模拟盘验证。
+
+## 12) 本地报价缓存 + 复合分析
+已支持：每次 `/v1/mt5/ingest` 收到报价后，都会落地到本地缓存文件：
+- `python/data/quote_history.jsonl`
+
+AI 在每次决策时会自动叠加使用：
+- 实时多周期K线分析（原有）
+- 本地报价缓存特征（新增）：`drift_bps`、`momentum_10_bps`、`spread_avg`、`spread_latest` 等
+
+这样可以在“当前快照 + 历史微观报价轨迹”上做复合判断，降低只看单帧数据的误判。
+
+可查询最近报价缓存：
+```bash
+curl -H "X-API-Key: change_me" \
+  "http://127.0.0.1:8000/v1/quotes/recent?symbol=BTCUSD&n=200"
+```

@@ -55,6 +55,7 @@ STYLE_FILE   = DATA_DIR / "style_profile.json"
 STRATEGY_FILE = DATA_DIR / "strategy_playbook.json"
 # 结构化交易历史（JSONL，每行一条）
 TRADE_LOG    = DATA_DIR / "trade_history.jsonl"
+QUOTE_LOG    = DATA_DIR / "quote_history.jsonl"
 # 旧的 review 文件保留兼容
 REVIEW_FILE  = DATA_DIR / "trade_review.md"
 
@@ -242,6 +243,59 @@ def _append_trade_record(record: TradeRecord) -> None:
     """追加一条结构化交易记录到 JSONL 文件"""
     with TRADE_LOG.open("a", encoding="utf-8") as f:
         f.write(record.model_dump_json() + "\n")
+
+
+def _append_quote_snapshot(snapshot: Snapshot) -> None:
+    quote = {
+        "ts": snapshot.time,
+        "symbol": snapshot.symbol,
+        "bid": snapshot.bid,
+        "ask": snapshot.ask,
+        "spread": round(max(snapshot.ask - snapshot.bid, 0.0), 8),
+        "positions": len(snapshot.positions),
+    }
+    with QUOTE_LOG.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(quote, ensure_ascii=False) + "\n")
+
+
+def _load_recent_quotes(symbol: str, n: int = 300) -> list[dict]:
+    if not QUOTE_LOG.exists():
+        return []
+    lines = QUOTE_LOG.read_text(encoding="utf-8").strip().splitlines()
+    recent = lines[-max(n * 3, n):] if len(lines) > n else lines
+    records: list[dict] = []
+    for line in recent:
+        try:
+            q = json.loads(line)
+            if q.get("symbol") == symbol:
+                records.append(q)
+        except json.JSONDecodeError:
+            pass
+    return records[-n:]
+
+
+def _quote_cache_features(snapshot: Snapshot, n: int = 240) -> dict:
+    quotes = _load_recent_quotes(snapshot.symbol, n)
+    if not quotes:
+        return {"count": 0}
+    mids = [((q.get("bid", 0) + q.get("ask", 0)) / 2) for q in quotes if q.get("bid") and q.get("ask")]
+    spreads = [q.get("spread", 0) for q in quotes]
+    if not mids:
+        return {"count": len(quotes)}
+    latest_mid = mids[-1]
+    prev_mid = mids[0]
+    drift_bps = ((latest_mid - prev_mid) / prev_mid * 10000) if prev_mid else 0.0
+    mom_10 = 0.0
+    if len(mids) > 10 and mids[-11] != 0:
+        mom_10 = (mids[-1] - mids[-11]) / mids[-11] * 10000
+    return {
+        "count": len(quotes),
+        "drift_bps": round(drift_bps, 2),
+        "momentum_10_bps": round(mom_10, 2),
+        "spread_avg": round(sum(spreads) / len(spreads), 8) if spreads else 0.0,
+        "spread_latest": spreads[-1] if spreads else 0.0,
+        "mid_latest": latest_mid,
+    }
 
 
 def _load_strategy_playbook() -> dict:
@@ -487,6 +541,7 @@ def _build_ai_payload(snapshot: Snapshot, user_message: str = "") -> dict:
     mtf           = _multi_tf_analysis(snapshot)
     style         = _load_json(STYLE_FILE, {"risk_preference": "conservative"})
     strategy      = _load_strategy_playbook()
+    quote_features = _quote_cache_features(snapshot)
 
     return {
         "mode":     runtime.mode,
@@ -513,12 +568,14 @@ def _build_ai_payload(snapshot: Snapshot, user_message: str = "") -> dict:
 
         "style":        style,
         "strategy_playbook": strategy,
+        "quote_cache_features": quote_features,
         "user_message": user_message,
 
         "instructions": (
             "You are a professional crypto trading AI for {symbol}. "
             "Analyze the multi-timeframe data: use H1 for trend direction, "
             "M15 for structure, M5 for entry timing, M1 for precise entry. "
+            "Additionally, use quote_cache_features from local quote cache for momentum/spread regime confirmation. "
             "On EVERY call, you must scan all existing positions first. "
             "If positions are open, prioritize position management: "
             "you may return modify_all_sl_tp to dynamically adjust stop-loss/take-profit, "
@@ -778,6 +835,7 @@ async def ingest(snapshot: Snapshot, x_api_key: str | None = Header(default=None
     _auth(x_api_key)
     previous_snapshot = runtime.last_snapshot
     runtime.last_snapshot = snapshot
+    _append_quote_snapshot(snapshot)
 
     logger.info(
         "Ingest | %s bid=%.2f ask=%.2f M1=%d M5=%d M15=%d H1=%d pos=%d",
@@ -890,6 +948,24 @@ async def get_trade_history(n: int = 50, x_api_key: str | None = Header(default=
     _auth(x_api_key)
     trades = _load_recent_trades(n)
     return {"total": len(trades), "summary": _trade_summary(trades), "trades": trades}
+
+
+@app.get("/v1/quotes/recent")
+async def get_recent_quotes(symbol: str, n: int = 200, x_api_key: str | None = Header(default=None)):
+    _auth(x_api_key)
+    quotes = _load_recent_quotes(symbol=symbol, n=n)
+    features = _quote_cache_features(Snapshot(
+        symbol=symbol,
+        bid=quotes[-1]["bid"] if quotes else 0.0,
+        ask=quotes[-1]["ask"] if quotes else 0.0,
+        time=quotes[-1]["ts"] if quotes else "",
+        positions=[],
+        candles_m1=[],
+        candles_m5=[],
+        candles_m15=[],
+        candles_h1=[],
+    ))
+    return {"total": len(quotes), "features": features, "quotes": quotes}
 
 
 @app.get("/v1/strategy/playbook")
