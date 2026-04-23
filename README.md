@@ -253,3 +253,27 @@ AI 在每次决策时会自动叠加使用：
 curl -H "X-API-Key: change_me" \
   "http://127.0.0.1:8000/v1/quotes/recent?symbol=BTCUSD&n=200"
 ```
+
+## 13) AI 策略实验室（候选策略 + 回测晋升）
+已新增数据驱动模块：`python/mt5_agent/strategy_lab.py`，目标是把“待测试策略”持续加入 Agent 的决策上下文，并根据本地数据回测后决定是否晋升为真实可用策略模板。
+
+工作流：
+1. 读取本地数据：`quote_history.jsonl` + `trade_history.jsonl`
+2. 构建候选策略（例如动量多/空）
+3. 进行轻量回测（胜率、平均bps、触发次数）
+4. 满足阈值则标记为 `promoted`，写入 `python/data/strategy_candidates.json`
+5. 每次 AI 决策时把 `strategy_candidates` 一并注入 payload，作为“Agent 大脑”候选模板
+
+默认阈值参数：
+- `LAB_MIN_BACKTEST_TRADES=15`
+
+接口：
+```bash
+# 主动运行一次策略实验室
+curl -X POST -H "X-API-Key: change_me" \
+  "http://127.0.0.1:8000/v1/strategy/lab/run?symbol=BTCUSD"
+
+# 查看当前候选策略（含 promoted 状态）
+curl -H "X-API-Key: change_me" \
+  "http://127.0.0.1:8000/v1/strategy/candidates?symbol=BTCUSD"
+```

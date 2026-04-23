@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from google import genai
 from google.genai import types as genai_types
 from pydantic import BaseModel, Field, field_validator
+from .strategy_lab import load_strategy_candidates, run_strategy_lab
 
 load_dotenv()
 
@@ -44,6 +45,7 @@ AI_FORCE_INTERVAL    = float(os.getenv("AI_FORCE_INTERVAL", "60"))
 AI_TRIGGER_PRICE_BPS = float(os.getenv("AI_TRIGGER_PRICE_BPS", "1.5"))
 REVIEW_EVERY_N_TRADES = int(os.getenv("REVIEW_EVERY_N_TRADES", "10"))
 RISK_CONTRACT_MULTIPLIER = float(os.getenv("RISK_CONTRACT_MULTIPLIER", "1.0"))
+LAB_MIN_BACKTEST_TRADES = int(os.getenv("LAB_MIN_BACKTEST_TRADES", "15"))
 
 # 历史交易最多回传给AI的条数
 TRADE_HISTORY_FOR_AI = int(os.getenv("TRADE_HISTORY_FOR_AI", "20"))
@@ -541,6 +543,7 @@ def _build_ai_payload(snapshot: Snapshot, user_message: str = "") -> dict:
     mtf           = _multi_tf_analysis(snapshot)
     style         = _load_json(STYLE_FILE, {"risk_preference": "conservative"})
     strategy      = _load_strategy_playbook()
+    strategy_candidates = load_strategy_candidates(DATA_DIR, snapshot.symbol)
     quote_features = _quote_cache_features(snapshot)
 
     return {
@@ -568,6 +571,7 @@ def _build_ai_payload(snapshot: Snapshot, user_message: str = "") -> dict:
 
         "style":        style,
         "strategy_playbook": strategy,
+        "strategy_candidates": strategy_candidates,
         "quote_cache_features": quote_features,
         "user_message": user_message,
 
@@ -576,6 +580,8 @@ def _build_ai_payload(snapshot: Snapshot, user_message: str = "") -> dict:
             "Analyze the multi-timeframe data: use H1 for trend direction, "
             "M15 for structure, M5 for entry timing, M1 for precise entry. "
             "Additionally, use quote_cache_features from local quote cache for momentum/spread regime confirmation. "
+            "Use strategy_candidates as candidate brains: treat promoted candidates as high-priority templates, "
+            "and keep testing non-promoted candidates with small risk. "
             "On EVERY call, you must scan all existing positions first. "
             "If positions are open, prioritize position management: "
             "you may return modify_all_sl_tp to dynamically adjust stop-loss/take-profit, "
@@ -902,9 +908,10 @@ async def order_result(payload: dict, x_api_key: str | None = Header(default=Non
     )
     _append_trade_record(record)
     review = _review_and_update_strategy()
+    lab = run_strategy_lab(DATA_DIR, record.symbol, min_trades=LAB_MIN_BACKTEST_TRADES)
     logger.info("Trade recorded | action=%s ok=%s ticket=%d price=%.2f",
                 record.action, record.ok, record.ticket, record.exec_price)
-    return {"ok": True, "strategy_review": review}
+    return {"ok": True, "strategy_review": review, "strategy_lab": lab}
 
 
 @app.post("/v1/mt5/close-result")
@@ -972,6 +979,18 @@ async def get_recent_quotes(symbol: str, n: int = 200, x_api_key: str | None = H
 async def get_strategy_playbook(x_api_key: str | None = Header(default=None)):
     _auth(x_api_key)
     return _load_strategy_playbook()
+
+
+@app.get("/v1/strategy/candidates")
+async def get_strategy_candidates(symbol: str, x_api_key: str | None = Header(default=None)):
+    _auth(x_api_key)
+    return load_strategy_candidates(DATA_DIR, symbol)
+
+
+@app.post("/v1/strategy/lab/run")
+async def run_strategy_candidates(symbol: str, x_api_key: str | None = Header(default=None)):
+    _auth(x_api_key)
+    return run_strategy_lab(DATA_DIR, symbol, min_trades=LAB_MIN_BACKTEST_TRADES)
 
 
 @app.post("/v1/chat")
