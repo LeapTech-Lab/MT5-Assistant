@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "last_review_trade_count": 10,
+  "parameters": {
+    "sl_buffer_factor": 1.0,
+    "tp_factor": 1.5,
+    "risk_mode": "conservative"
+  },
+  "rules": [],
+  "notes": [
+    {
+      "ts": "2026-04-23T08:48:50.811202+00:00",
+      "total_closed": 0,
+      "wins": 0,
+      "losses": 0,
+      "by_action": {},
+      "by_reason": {},
+      "new_rules_count": 0
+    },
+    {
+      "ts": "2026-04-23T08:56:04.750393+00:00",
+      "total_closed": 0,
+      "wins": 0,
+      "losses": 0,
+      "by_action": {},
+      "by_reason": {},
+      "new_rules_count": 0
+    }
+  ]
+}

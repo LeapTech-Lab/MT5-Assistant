@@ -1,13 +1,13 @@
 {
-  "last_update": "2026-04-23T08:37:41.258920+00:00",
+  "last_update": "2026-04-23T09:00:51.649112+00:00",
   "mode": "kernel",
   "next_command": {
-    "action": "sell_market",
+    "action": "none",
     "volume": 0.01,
-    "sl": 4717.0,
-    "tp": 4689.6,
-    "price": 4706.04,
-    "reason": "H1, M15, M5, and M1 timeframes all show a clear downtrend, with price below their respective MA10s. H1 also exhibits a bearish engulfing pattern. Initiating a sell order at market price, setting Stop Loss above recent resistance and M5 MA10, and Take Profit based on a 1:1.5 risk-reward ratio."
+    "sl": 0.0,
+    "tp": 0.0,
+    "price": 0.0,
+    "reason": "Command consumed"
   },
   "last_symbol": "XAUUSD"
 }
