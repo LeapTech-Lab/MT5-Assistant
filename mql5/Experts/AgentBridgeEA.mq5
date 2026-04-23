@@ -116,12 +116,39 @@ void ExecuteCommandIfAny(string raw)
    if(StringFind(raw, "\"action\":\"none\"") >= 0) return;
    string action = JsonExtract(raw, "action");
    if(action == "" || action == "none") return;
+   string reason = JsonExtract(raw, "reason");
 
    double volume = StringToDouble(JsonExtract(raw, "volume"));
    double sl     = StringToDouble(JsonExtract(raw, "sl"));
    double tp     = StringToDouble(JsonExtract(raw, "tp"));
    double price  = StringToDouble(JsonExtract(raw, "price"));
    if(volume < 0.01) volume = 0.01;
+
+   if(action == "close_all")
+   {
+      bool ok_all = PM_CloseAllPositions(InpSymbol);
+      Print("Position manage action=close_all ok=", ok_all);
+      string result_close = StringFormat(
+         "{\"ok\":%s,\"retcode\":0,\"comment\":\"close_all\",\"action\":\"%s\",\"volume\":0,"
+         "\"sl\":0,\"tp\":0,\"exec_price\":0,\"ticket\":0,\"reason\":\"%s\"}",
+         ok_all?"true":"false", action, reason
+      );
+      HttpPost("/v1/mt5/order-result", result_close);
+      return;
+   }
+   if(action == "modify_all_sl_tp")
+   {
+      bool ok_mod = PM_ModifyAllPositionsSLTP(InpSymbol, sl, tp);
+      Print("Position manage action=modify_all_sl_tp ok=", ok_mod, " sl=", sl, " tp=", tp);
+      int digits_mod = (int)SymbolInfoInteger(InpSymbol, SYMBOL_DIGITS);
+      string result_mod = StringFormat(
+         "{\"ok\":%s,\"retcode\":0,\"comment\":\"modify_all_sl_tp\",\"action\":\"%s\",\"volume\":0,"
+         "\"sl\":%.*f,\"tp\":%.*f,\"exec_price\":0,\"ticket\":0,\"reason\":\"%s\"}",
+         ok_mod?"true":"false", action, digits_mod, sl, digits_mod, tp, reason
+      );
+      HttpPost("/v1/mt5/order-result", result_mod);
+      return;
+   }
 
    MqlTradeRequest req; MqlTradeResult res;
    ZeroMemory(req); ZeroMemory(res);
@@ -145,11 +172,73 @@ void ExecuteCommandIfAny(string raw)
    string result = StringFormat(
       "{\"ok\":%s,\"retcode\":%d,\"comment\":\"%s\","
       "\"action\":\"%s\",\"volume\":%.2f,"
-      "\"sl\":%.*f,\"tp\":%.*f,\"exec_price\":%.*f,\"ticket\":%I64u}",
+      "\"sl\":%.*f,\"tp\":%.*f,\"exec_price\":%.*f,\"ticket\":%I64u,\"reason\":\"%s\"}",
       ok?"true":"false", res.retcode, res.comment,
-      action, volume, digits, sl, digits, tp, digits, res.price, res.deal
+      action, volume, digits, sl, digits, tp, digits, res.price, res.deal, reason
    );
    HttpPost("/v1/mt5/order-result", result);
+}
+
+bool PM_CloseAllPositions(string symbol)
+{
+   bool ok_all = true;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL) != symbol) continue;
+      long ptype = PositionGetInteger(POSITION_TYPE);
+      double vol = PositionGetDouble(POSITION_VOLUME);
+      if(vol <= 0) continue;
+
+      MqlTradeRequest req; MqlTradeResult res;
+      ZeroMemory(req); ZeroMemory(res);
+      req.action = TRADE_ACTION_DEAL;
+      req.symbol = symbol;
+      req.position = ticket;
+      req.volume = vol;
+      req.deviation = 20;
+      req.magic = 808888;
+      req.type_filling = ORDER_FILLING_IOC;
+
+      if(ptype == POSITION_TYPE_BUY)
+      {
+         req.type = ORDER_TYPE_SELL;
+         req.price = SymbolInfoDouble(symbol, SYMBOL_BID);
+      }
+      else
+      {
+         req.type = ORDER_TYPE_BUY;
+         req.price = SymbolInfoDouble(symbol, SYMBOL_ASK);
+      }
+
+      bool ok = OrderSend(req, res);
+      if(!ok) ok_all = false;
+   }
+   return ok_all;
+}
+
+bool PM_ModifyAllPositionsSLTP(string symbol, double sl, double tp)
+{
+   bool ok_all = true;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL) != symbol) continue;
+
+      MqlTradeRequest req; MqlTradeResult res;
+      ZeroMemory(req); ZeroMemory(res);
+      req.action = TRADE_ACTION_SLTP;
+      req.symbol = symbol;
+      req.position = ticket;
+      req.sl = sl;
+      req.tp = tp;
+
+      bool ok = OrderSend(req, res);
+      if(!ok) ok_all = false;
+   }
+   return ok_all;
 }
 
 // ── HTTP ─────────────────────────────────────────────────────────
