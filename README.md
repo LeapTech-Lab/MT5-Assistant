@@ -170,9 +170,31 @@ curl -X POST "http://127.0.0.1:8000/v1/chat" \
   }'
 ```
 
+### 内核模式“立即下单开仓”示例
+当系统是 `kernel` 模式时，你可以直接在聊天里下达：
+
+```bash
+curl -X POST "http://127.0.0.1:8000/v1/chat" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "symbol": "XAUUSD",
+    "message": "立即下单开仓，给出开仓原因、逻辑和胜率预测"
+  }'
+```
+
+系统会做这些事：
+- 立即触发一次 AI 决策（绕过最小间隔节流）
+- 返回结构化指令 `command`（含 action/volume/sl/tp）
+- 返回 `decision_logic`、`win_rate_estimate`、`position_management_plan`
+- 若指令可执行，会自动写入 `next-command` 队列，EA 可直接拉取执行
+
 典型返回字段：
 - `answer`：自然语言建议
 - `command`：结构化交易指令（action/volume/sl/tp）
+- `force_trade_requested` / `queued_for_execution`：是否是“立即下单”请求，是否已入执行队列
+- `decision_logic`：当前开单逻辑摘要（H1/M15 趋势、M5/M1 形态）
+- `win_rate_estimate`：当前策略胜率估计（结合历史交易胜率）
+- `position_management_plan`：仓位管理建议（静态/动态止盈止损）
 - `multi_tf`：多周期分析摘要
 - `provider`：当前 AI 提供商
 

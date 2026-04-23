@@ -402,6 +402,50 @@ def _build_ai_payload(snapshot: Snapshot, user_message: str = "") -> dict:
     }
 
 
+def _is_force_trade_request(message: str) -> bool:
+    text = (message or "").lower()
+    keywords = ["立即下单", "立即开仓", "马上开仓", "market now", "open now", "buy now", "sell now"]
+    return any(k in text for k in keywords)
+
+
+def _build_trade_explanation(snapshot: Snapshot, cmd: TradeCommand) -> dict:
+    mtf = _multi_tf_analysis(snapshot)
+    trades = _load_recent_trades(TRADE_HISTORY_FOR_AI)
+    stats = _trade_summary(trades)
+
+    h1_trend = mtf["h1"].get("trend", "unknown")
+    m15_trend = mtf["m15"].get("trend", "unknown")
+    trend_aligned = h1_trend == m15_trend and h1_trend in {"up", "down"}
+
+    historical_win_rate = float(stats.get("win_rate", 0) or 0)
+    base_rate = 0.5 if trend_aligned else 0.4
+    if cmd.action in {"buy_market", "sell_market", "buy_limit", "sell_limit", "buy_stop", "sell_stop"}:
+        base_rate += 0.05
+    if cmd.action == "none":
+        base_rate -= 0.1
+    estimated = max(0.2, min(0.85, (base_rate * 0.6 + historical_win_rate * 0.4)))
+
+    return {
+        "decision_logic": {
+            "h1_trend": h1_trend,
+            "m15_trend": m15_trend,
+            "trend_aligned": trend_aligned,
+            "m5_pattern": mtf["m5"].get("pattern", "unknown"),
+            "m1_pattern": mtf["m1"].get("pattern", "unknown"),
+        },
+        "win_rate_estimate": round(estimated, 2),
+        "historical_win_rate": historical_win_rate,
+        "position_management_plan": {
+            "type": "dynamic" if trend_aligned else "static",
+            "guideline": (
+                "若浮盈达到1R可上移止损到保本；趋势延续时按M5上一根K线低/高点跟踪止损。"
+                if trend_aligned else
+                "固定止损止盈，达到TP前不加仓，连续两笔亏损后暂停。"
+            ),
+        },
+    }
+
+
 def _to_bool(v: str | None) -> bool:
     return str(v or "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -503,7 +547,7 @@ async def _call_gemini(_client: httpx.AsyncClient, prompt_json: str) -> TradeCom
     return await asyncio.to_thread(_call_gemini_sync, prompt_json)
 
 
-async def _call_ai(snapshot: Snapshot, user_message: str = "") -> TradeCommand:
+async def _call_ai(snapshot: Snapshot, user_message: str = "", force_call: bool = False) -> TradeCommand:
     global _last_ai_call_time
 
     if AI_PROVIDER in {"openai", "openai_compatible", "deepseek", "moonshot", "qwen", "siliconflow", "anthropic"} and not AI_API_KEY:
@@ -511,7 +555,7 @@ async def _call_ai(snapshot: Snapshot, user_message: str = "") -> TradeCommand:
 
     now     = time.time()
     elapsed = now - _last_ai_call_time
-    if elapsed < AI_CALL_MIN_INTERVAL:
+    if (not force_call) and elapsed < AI_CALL_MIN_INTERVAL:
         wait = AI_CALL_MIN_INTERVAL - elapsed
         logger.info("Rate limit guard: skip AI, next in %.1fs", wait)
         return TradeCommand(action="none", reason=f"Rate limit guard, retry in {wait:.0f}s")
@@ -686,12 +730,25 @@ async def chat(req: ChatReq):
     snapshot = runtime.last_snapshot
     if snapshot is None:
         return {"answer": "尚未收到 MT5 数据，请先启动 EA。"}
-    cmd = await _call_ai(snapshot, req.message)
+    force_trade = runtime.mode == "kernel" and _is_force_trade_request(req.message)
+    cmd = await _call_ai(snapshot, req.message, force_call=force_trade)
     mtf = _multi_tf_analysis(snapshot)
+    explain = _build_trade_explanation(snapshot, cmd)
+
+    if force_trade and cmd.action != "none":
+        runtime.next_command = cmd
+        _persist_state()
+
     return {
         "mode":     runtime.mode,
         "answer":   f"建议动作: {cmd.action}, 手数: {cmd.volume}, SL: {cmd.sl}, TP: {cmd.tp}\n原因: {cmd.reason}",
         "command":  cmd,
+        "force_trade_requested": force_trade,
+        "queued_for_execution": force_trade and cmd.action != "none",
+        "decision_logic": explain["decision_logic"],
+        "win_rate_estimate": explain["win_rate_estimate"],
+        "historical_win_rate": explain["historical_win_rate"],
+        "position_management_plan": explain["position_management_plan"],
         "multi_tf": mtf,
         "provider": AI_PROVIDER,
     }
