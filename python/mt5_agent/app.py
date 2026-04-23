@@ -303,7 +303,8 @@ def _quote_cache_features(snapshot: Snapshot, n: int = 240) -> dict:
 def _load_strategy_playbook() -> dict:
     default = {
         "version": 1,
-        "last_review_trade_count": 0,
+        "last_review_trade_count": 0,  # 兼容旧字段
+        "last_review_closed_count": 0,
         "parameters": {
             "sl_buffer_factor": 1.0,
             "tp_factor": 1.5,
@@ -368,13 +369,15 @@ def _extract_reason_tag(reason: str | None) -> str:
 def _review_and_update_strategy() -> dict:
     trades = _load_recent_trades(500)
     playbook = _load_strategy_playbook()
-    total = len(trades)
-    if total == 0:
-        return {"reviewed": False, "reason": "no trades"}
-    if total - int(playbook.get("last_review_trade_count", 0)) < REVIEW_EVERY_N_TRADES:
-        return {"reviewed": False, "reason": "review interval not reached", "total": total}
-
     closed = [t for t in trades if t.get("outcome") in {"win", "loss"}]
+    closed_total = len(closed)
+    if closed_total == 0:
+        return {"reviewed": False, "reason": "no closed trades yet", "closed_total": 0}
+
+    last_closed = int(playbook.get("last_review_closed_count", playbook.get("last_review_trade_count", 0)))
+    if closed_total - last_closed < REVIEW_EVERY_N_TRADES:
+        return {"reviewed": False, "reason": "review interval not reached", "closed_total": closed_total}
+
     wins = [t for t in closed if t.get("outcome") == "win"]
     losses = [t for t in closed if t.get("outcome") == "loss"]
     by_action: dict[str, dict[str, int]] = {}
@@ -430,9 +433,15 @@ def _review_and_update_strategy() -> dict:
         "new_rules_count": len(new_rules),
     }
     playbook["notes"] = (playbook.get("notes", []) + [note])[-100:]
-    playbook["last_review_trade_count"] = total
+    playbook["last_review_trade_count"] = len(trades)
+    playbook["last_review_closed_count"] = closed_total
     _save_strategy_playbook(playbook)
-    return {"reviewed": True, "new_rules_count": len(new_rules), "parameters": playbook["parameters"]}
+    return {
+        "reviewed": True,
+        "new_rules_count": len(new_rules),
+        "parameters": playbook["parameters"],
+        "closed_total": closed_total,
+    }
 
 
 # ─────────────────────────────────────────────────────────────
@@ -766,6 +775,21 @@ def _call_gemini_sync(prompt_json: str) -> TradeCommand:
 async def _call_gemini(_client: httpx.AsyncClient, prompt_json: str) -> TradeCommand:
     return await asyncio.to_thread(_call_gemini_sync, prompt_json)
 
+    use_vertex = _to_bool(os.getenv("GOOGLE_GENAI_USE_VERTEXAI"))
+    if use_vertex:
+        client = genai.Client(http_options=http_options)
+    else:
+        client = genai.Client(api_key=AI_API_KEY, http_options=http_options)
+    response = client.models.generate_content(
+        model=AI_MODEL,
+        contents=prompt_json,
+        config=genai_types.GenerateContentConfig(response_mime_type="application/json"),
+    )
+    return _normalize_trade_command(response.text or "")
+
+
+async def _call_gemini(_client: httpx.AsyncClient, prompt_json: str) -> TradeCommand:
+    return await asyncio.to_thread(_call_gemini_sync, prompt_json)
 
 async def _call_ai(snapshot: Snapshot, user_message: str = "", force_call: bool = False) -> TradeCommand:
     global _last_ai_call_time
@@ -907,11 +931,10 @@ async def order_result(payload: dict, x_api_key: str | None = Header(default=Non
         decision_reason = payload.get("reason"),
     )
     _append_trade_record(record)
-    review = _review_and_update_strategy()
     lab = run_strategy_lab(DATA_DIR, record.symbol, min_trades=LAB_MIN_BACKTEST_TRADES)
     logger.info("Trade recorded | action=%s ok=%s ticket=%d price=%.2f",
                 record.action, record.ok, record.ticket, record.exec_price)
-    return {"ok": True, "strategy_review": review, "strategy_lab": lab}
+    return {"ok": True, "strategy_lab": lab, "hint": "review runs after close-result with realized PnL"}
 
 
 @app.post("/v1/mt5/close-result")
@@ -947,7 +970,8 @@ async def close_result(payload: dict, x_api_key: str | None = Header(default=Non
         new_lines.append(line)
     TRADE_LOG.write_text("\n".join(reversed(new_lines)) + "\n", encoding="utf-8")
     logger.info("Close result updated | ticket=%d profit=%.2f outcome=%s", ticket, profit, outcome)
-    return {"ok": updated, "outcome": outcome}
+    review = _review_and_update_strategy()
+    return {"ok": updated, "outcome": outcome, "strategy_review": review}
 
 
 @app.get("/v1/trade-history")

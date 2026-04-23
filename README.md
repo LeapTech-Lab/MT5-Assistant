@@ -221,7 +221,7 @@ EA 已支持执行以上两个动作，因此可以实现：
 
 ## 11) 自动复盘与策略自我迭代
 系统已新增“复盘模块”：
-- 每累计 `REVIEW_EVERY_N_TRADES` 笔交易结果后，自动读取历史交易（含下单原因）做一次复盘。
+- 每累计 `REVIEW_EVERY_N_TRADES` 笔**已平仓（win/loss）**交易后，自动读取历史交易（含下单原因）做一次复盘。
 - 复盘会统计：按动作（buy/sell/close/modify）与按原因标签（trend/breakout/reversal等）的胜负表现。
 - 根据统计自动更新策略参数，例如：
   - 做多持续亏损时，增大 `sl_buffer_factor`（更宽止损缓冲）
@@ -237,6 +237,7 @@ curl -H "X-API-Key: change_me" "http://127.0.0.1:8000/v1/strategy/playbook"
 ```
 
 > 注意：该复盘模块是“策略优化器”，不能保证稳定盈利；建议持续结合回测与模拟盘验证。
+> 说明：复盘触发点在 `/v1/mt5/close-result`（有真实盈亏后），仅有开仓记录但没有平仓结果时，`strategy_playbook.json` 的统计会保持 0。
 
 ## 12) 本地报价缓存 + 复合分析
 已支持：每次 `/v1/mt5/ingest` 收到报价后，都会落地到本地缓存文件：
