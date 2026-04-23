@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
-
+import numpy as np  # 如果没import，添加它
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -68,6 +68,81 @@ _last_ai_call_time: float = 0.0
 
 app = FastAPI(title="MT5 AI Bridge v2")
 
+
+
+
+def _calculate_atr(candles: list[Candle], period: int = 14) -> float:
+    """简单ATR计算（基于M15/H1更稳），兼容你的Candle模型"""
+    if len(candles) < period + 1:
+        return 0.0
+    trs = []
+    for i in range(1, len(candles)):
+        c = candles[i]
+        p = candles[i-1]
+        high_low = c.h_ - c.l_
+        high_prev_close = abs(c.h_ - p.c_)
+        low_prev_close = abs(c.l_ - p.c_)
+        tr = max(high_low, high_prev_close, low_prev_close)
+        trs.append(tr)
+    # 简单移动平均ATR（可改成Wilder平滑，但够用）
+    return float(np.mean(trs[-period:])) if trs else 0.0
+
+
+def _calculate_trailing_sl_tp(
+    snapshot: Snapshot,
+    direction: str,  # "buy" or "sell"
+    current_profit_pips: float,  # 当前浮盈（点数或价格单位）
+    entry_price: float,
+    initial_sl: float,
+    atr_value: float,
+    playbook: dict
+) -> tuple[float, float]:  # 返回 (new_sl, new_tp)
+    """动态Trailing止盈逻辑"""
+    params = playbook.get("parameters", {})
+    tp_factor = float(params.get("tp_factor", 1.5))
+    sl_buffer = float(params.get("sl_buffer_factor", 1.0))
+    risk_mode = params.get("risk_mode", "conservative")
+
+    multiplier = 2.0 if risk_mode == "conservative" else 1.5  # 可配置
+    if atr_value <= 0:
+        atr_value = abs(entry_price - initial_sl)  # fallback
+
+    trail_distance = atr_value * multiplier * sl_buffer
+
+    # 1. 达到保本阈值 -> SL移到入场价附近（加一点buffer防滑点）
+    breakeven_threshold = atr_value * 0.8  # 浮盈0.8ATR左右保本
+    if (direction == "buy" and current_profit_pips > breakeven_threshold) or \
+       (direction == "sell" and current_profit_pips > breakeven_threshold):
+        new_sl = entry_price + (0.0005 * entry_price if direction == "buy" else -0.0005 * entry_price)  # 小buffer
+    else:
+        new_sl = initial_sl
+
+    # 2. 趋势延续时Trailing
+    mtf = _multi_tf_analysis(snapshot)
+    h1_trend = mtf["h1"].get("trend", "unknown")
+    m15_trend = mtf["m15"].get("trend", "unknown")
+    aligned = h1_trend == m15_trend and h1_trend in {"up", "down"}
+
+    if aligned:
+        trail_distance *= 0.8  # 趋势强时收紧一点，让利润多跑
+
+    if direction == "buy":
+        # 多头：SL = max(当前SL, 当前Bid - trail_distance)
+        candidate_sl = snapshot.bid - trail_distance
+        new_sl = max(new_sl, candidate_sl)
+        new_tp = snapshot.bid + (tp_factor * atr_value)  # 动态TP也可，但主要靠trailing
+    else:  # sell
+        candidate_sl = snapshot.ask + trail_distance
+        new_sl = min(new_sl, candidate_sl)
+        new_tp = snapshot.ask - (tp_factor * atr_value)
+
+    # 额外保护：不让SL反向移动（只朝有利方向）
+    if direction == "buy" and new_sl < initial_sl:
+        new_sl = initial_sl
+    elif direction == "sell" and new_sl > initial_sl:
+        new_sl = initial_sl
+
+    return round(new_sl, 2), round(new_tp, 2)  # 根据金价精度调整
 
 # ─────────────────────────────────────────────────────────────
 # 422 详情日志
@@ -504,11 +579,47 @@ def _risk_guard(snapshot: Snapshot, cmd: TradeCommand) -> TradeCommand:
         return cmd
     if cmd.action == "close_all":
         return _close_all_noise_guard(snapshot, cmd)
+    # if cmd.action == "modify_all_sl_tp":
+    #     if cmd.sl <= 0 or cmd.tp <= 0:
+    #         return TradeCommand(action="none", reason="modify_all_sl_tp requires SL/TP")
+    #     if not snapshot.positions:
+    #         return TradeCommand(action="none", reason="No positions to modify")
+    #     return cmd
     if cmd.action == "modify_all_sl_tp":
-        if cmd.sl <= 0 or cmd.tp <= 0:
-            return TradeCommand(action="none", reason="modify_all_sl_tp requires SL/TP")
         if not snapshot.positions:
-            return TradeCommand(action="none", reason="No positions to modify")
+            return TradeCommand(action="none", reason="No positions")
+        
+        # 新增：为每个持仓计算动态SL/TP
+        playbook = _load_strategy_playbook()
+        direction = _position_direction(snapshot)
+        if direction == "none" or direction == "mixed":
+            return cmd  # mixed不自动改
+
+        atr_m15 = _calculate_atr(snapshot.candles_m15, period=14)
+        atr_h1 = _calculate_atr(snapshot.candles_h1, period=14)
+        atr_value = (atr_m15 + atr_h1) / 2 or 10.0  # fallback ~10美元 for gold
+
+        # 示例：假设取第一个持仓的entry（实际可循环所有positions）
+        pos = snapshot.positions[0]
+        entry = pos.price_open
+        current_profit = pos.profit  # 或计算pips: (current_price - entry) * direction_factor
+
+        # 简化：用profit估算是否盈利（实际可更精确计算pips）
+        is_profitable = pos.profit > 0
+        if is_profitable:
+            new_sl, new_tp = _calculate_trailing_sl_tp(
+                snapshot, 
+                "buy" if pos.type == 0 else "sell",
+                abs(pos.profit),  # 简化，用profit代替pips
+                entry,
+                pos.sl,
+                atr_value,
+                playbook
+            )
+            cmd.sl = new_sl
+            cmd.tp = new_tp
+            cmd.reason += f" | dynamic trail ATR={atr_value:.1f} SL->{new_sl}"
+        
         return cmd
     if cmd.volume < 0.01:
         cmd.volume = 0.01
@@ -668,6 +779,11 @@ def _build_ai_payload(snapshot: Snapshot, user_message: str = "") -> dict:
             "Review the trade history to learn from past wins and losses. "
             "Only trade when H1 and M15 agree on direction. "
             "Always provide SL and TP. Reply ONLY with a JSON object matching the schema."
+            "Use dynamic trailing stop instead of fixed TP when in profit. "
+            "Move SL to breakeven after ~0.8 ATR profit. Then trail SL using 1.5-2.5x ATR on M15/H1, "
+            "tighten in strong aligned trends (H1+M15 same direction). "
+            "Prefer modify_all_sl_tp over close_all unless higher TF invalidates. "
+            "Review strategy_playbook parameters (tp_factor, sl_buffer_factor) for trailing multipliers."
         ).format(symbol=snapshot.symbol),
 
         "required_json_schema": TradeCommand.model_json_schema(),

@@ -1,8 +1,8 @@
 {
   "symbol": "XAUUSD",
-  "latest_momentum_10_bps": -2.543,
-  "trade_count": 39,
-  "quote_count": 264,
+  "latest_momentum_10_bps": 10.336,
+  "trade_count": 84,
+  "quote_count": 351,
   "candidates": [
     {
       "id": "mom_long_XAUUSD",
@@ -13,9 +13,9 @@
       },
       "status": "testing",
       "evaluation": {
-        "trades": 25,
-        "win_rate": 0.4,
-        "avg_bps": -0.753
+        "trades": 47,
+        "win_rate": 0.319,
+        "avg_bps": -2.5
       }
     },
     {
@@ -27,9 +27,9 @@
       },
       "status": "testing",
       "evaluation": {
-        "trades": 32,
-        "win_rate": 0.125,
-        "avg_bps": -3.126
+        "trades": 63,
+        "win_rate": 0.27,
+        "avg_bps": -2.947
       }
     }
   ]

@@ -4,7 +4,9 @@
   "parameters": {
     "sl_buffer_factor": 1.0,
     "tp_factor": 1.5,
-    "risk_mode": "conservative"
+    "risk_mode": "conservative",
+    "trailing_multiplier": 2.0,
+    "breakeven_atr": 0.8
   },
   "rules": [],
   "notes": [
