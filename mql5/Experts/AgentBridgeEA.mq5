@@ -126,7 +126,7 @@ void ExecuteCommandIfAny(string raw)
 
    if(action == "close_all")
    {
-      bool ok_all = CloseAllPositions(InpSymbol);
+      bool ok_all = PM_CloseAllPositions(InpSymbol);
       Print("Position manage action=close_all ok=", ok_all);
       string result_close = StringFormat(
          "{\"ok\":%s,\"retcode\":0,\"comment\":\"close_all\",\"action\":\"%s\",\"volume\":0,"
@@ -138,7 +138,7 @@ void ExecuteCommandIfAny(string raw)
    }
    if(action == "modify_all_sl_tp")
    {
-      bool ok_mod = ModifyAllPositionsSLTP(InpSymbol, sl, tp);
+      bool ok_mod = PM_ModifyAllPositionsSLTP(InpSymbol, sl, tp);
       Print("Position manage action=modify_all_sl_tp ok=", ok_mod, " sl=", sl, " tp=", tp);
       int digits_mod = (int)SymbolInfoInteger(InpSymbol, SYMBOL_DIGITS);
       string result_mod = StringFormat(
@@ -177,6 +177,68 @@ void ExecuteCommandIfAny(string raw)
       action, volume, digits, sl, digits, tp, digits, res.price, res.deal, reason
    );
    HttpPost("/v1/mt5/order-result", result);
+}
+
+bool PM_CloseAllPositions(string symbol)
+{
+   bool ok_all = true;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL) != symbol) continue;
+      long ptype = PositionGetInteger(POSITION_TYPE);
+      double vol = PositionGetDouble(POSITION_VOLUME);
+      if(vol <= 0) continue;
+
+      MqlTradeRequest req; MqlTradeResult res;
+      ZeroMemory(req); ZeroMemory(res);
+      req.action = TRADE_ACTION_DEAL;
+      req.symbol = symbol;
+      req.position = ticket;
+      req.volume = vol;
+      req.deviation = 20;
+      req.magic = 808888;
+      req.type_filling = ORDER_FILLING_IOC;
+
+      if(ptype == POSITION_TYPE_BUY)
+      {
+         req.type = ORDER_TYPE_SELL;
+         req.price = SymbolInfoDouble(symbol, SYMBOL_BID);
+      }
+      else
+      {
+         req.type = ORDER_TYPE_BUY;
+         req.price = SymbolInfoDouble(symbol, SYMBOL_ASK);
+      }
+
+      bool ok = OrderSend(req, res);
+      if(!ok) ok_all = false;
+   }
+   return ok_all;
+}
+
+bool PM_ModifyAllPositionsSLTP(string symbol, double sl, double tp)
+{
+   bool ok_all = true;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL) != symbol) continue;
+
+      MqlTradeRequest req; MqlTradeResult res;
+      ZeroMemory(req); ZeroMemory(res);
+      req.action = TRADE_ACTION_SLTP;
+      req.symbol = symbol;
+      req.position = ticket;
+      req.sl = sl;
+      req.tp = tp;
+
+      bool ok = OrderSend(req, res);
+      if(!ok) ok_all = false;
+   }
+   return ok_all;
 }
 
 bool CloseAllPositions(string symbol)
