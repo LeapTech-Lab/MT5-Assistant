@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -14,6 +15,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from google import genai
+from google.genai import types as genai_types
 from pydantic import BaseModel, Field, field_validator
 
 load_dotenv()
@@ -25,17 +28,20 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 # Config
 # ─────────────────────────────────────────────────────────────
 API_KEY              = os.getenv("BRIDGE_API_KEY", "change_me")
-AI_PROVIDER          = os.getenv("AI_PROVIDER", "openai_compatible").lower()
-AI_BASE_URL          = os.getenv("AI_BASE_URL", "https://api.openai.com/v1")
+AI_PROVIDER          = os.getenv("AI_PROVIDER", "gemini").lower()
+AI_BASE_URL          = os.getenv("AI_BASE_URL", "https://generativelanguage.googleapis.com")
 AI_API_KEY           = os.getenv("AI_API_KEY", "")
-AI_MODEL             = os.getenv("AI_MODEL", "gpt-4.1-mini")
+AI_MODEL             = os.getenv("AI_MODEL", "gemini-2.5-flash")
 AI_TIMEOUT_SECONDS   = int(os.getenv("AI_TIMEOUT_SECONDS", "30"))
 OPENAI_PATH          = os.getenv("OPENAI_PATH", "/chat/completions")
 ANTHROPIC_VERSION    = os.getenv("ANTHROPIC_VERSION", "2023-06-01")
 GEMINI_PATH_TEMPLATE = os.getenv("GEMINI_PATH_TEMPLATE", "/v1beta/models/{model}:generateContent")
+GEMINI_PROXY_URL     = os.getenv("GEMINI_PROXY_URL", "").strip()
 MAX_RISK_PERCENT     = float(os.getenv("MAX_RISK_PERCENT", "1.0"))
 DEFAULT_AGENT_MODE   = os.getenv("DEFAULT_AGENT_MODE", "user")
 AI_CALL_MIN_INTERVAL = float(os.getenv("AI_CALL_MIN_INTERVAL", "10"))
+AI_FORCE_INTERVAL    = float(os.getenv("AI_FORCE_INTERVAL", "60"))
+AI_TRIGGER_PRICE_BPS = float(os.getenv("AI_TRIGGER_PRICE_BPS", "1.5"))
 
 # 历史交易最多回传给AI的条数
 TRADE_HISTORY_FOR_AI = int(os.getenv("TRADE_HISTORY_FOR_AI", "20"))
@@ -161,6 +167,7 @@ class TradeCommand(BaseModel):
     action: Literal[
         "none", "buy_market", "sell_market",
         "buy_limit", "sell_limit", "buy_stop", "sell_stop",
+        "close_all", "modify_all_sl_tp",
     ] = "none"
     volume: float = 0.01
     sl: float = 0.0
@@ -321,6 +328,14 @@ def _multi_tf_analysis(snapshot: Snapshot) -> dict:
 def _risk_guard(snapshot: Snapshot, cmd: TradeCommand) -> TradeCommand:
     if cmd.action == "none":
         return cmd
+    if cmd.action == "close_all":
+        return cmd
+    if cmd.action == "modify_all_sl_tp":
+        if cmd.sl <= 0 or cmd.tp <= 0:
+            return TradeCommand(action="none", reason="modify_all_sl_tp requires SL/TP")
+        if not snapshot.positions:
+            return TradeCommand(action="none", reason="No positions to modify")
+        return cmd
     if cmd.volume < 0.01:
         cmd.volume = 0.01
     if cmd.sl <= 0 or cmd.tp <= 0:
@@ -387,6 +402,10 @@ def _build_ai_payload(snapshot: Snapshot, user_message: str = "") -> dict:
             "You are a professional crypto trading AI for {symbol}. "
             "Analyze the multi-timeframe data: use H1 for trend direction, "
             "M15 for structure, M5 for entry timing, M1 for precise entry. "
+            "On EVERY call, you must scan all existing positions first. "
+            "If positions are open, prioritize position management: "
+            "you may return modify_all_sl_tp to dynamically adjust stop-loss/take-profit, "
+            "or close_all when risk becomes unclear or market invalidates the thesis. "
             "Review the trade history to learn from past wins and losses. "
             "Only trade when H1 and M15 agree on direction. "
             "Always provide SL and TP. Reply ONLY with a JSON object matching the schema."
@@ -394,6 +413,84 @@ def _build_ai_payload(snapshot: Snapshot, user_message: str = "") -> dict:
 
         "required_json_schema": TradeCommand.model_json_schema(),
     }
+
+
+def _is_force_trade_request(message: str) -> bool:
+    text = (message or "").lower()
+    keywords = ["立即下单", "立即开仓", "马上开仓", "market now", "open now", "buy now", "sell now"]
+    return any(k in text for k in keywords)
+
+
+def _build_trade_explanation(snapshot: Snapshot, cmd: TradeCommand) -> dict:
+    mtf = _multi_tf_analysis(snapshot)
+    trades = _load_recent_trades(TRADE_HISTORY_FOR_AI)
+    stats = _trade_summary(trades)
+
+    h1_trend = mtf["h1"].get("trend", "unknown")
+    m15_trend = mtf["m15"].get("trend", "unknown")
+    trend_aligned = h1_trend == m15_trend and h1_trend in {"up", "down"}
+
+    historical_win_rate = float(stats.get("win_rate", 0) or 0)
+    base_rate = 0.5 if trend_aligned else 0.4
+    if cmd.action in {"buy_market", "sell_market", "buy_limit", "sell_limit", "buy_stop", "sell_stop"}:
+        base_rate += 0.05
+    if cmd.action == "none":
+        base_rate -= 0.1
+    estimated = max(0.2, min(0.85, (base_rate * 0.6 + historical_win_rate * 0.4)))
+
+    return {
+        "decision_logic": {
+            "h1_trend": h1_trend,
+            "m15_trend": m15_trend,
+            "trend_aligned": trend_aligned,
+            "m5_pattern": mtf["m5"].get("pattern", "unknown"),
+            "m1_pattern": mtf["m1"].get("pattern", "unknown"),
+        },
+        "win_rate_estimate": round(estimated, 2),
+        "historical_win_rate": historical_win_rate,
+        "position_management_plan": {
+            "type": "dynamic" if trend_aligned else "static",
+            "guideline": (
+                "若浮盈达到1R可上移止损到保本；趋势延续时按M5上一根K线低/高点跟踪止损。"
+                if trend_aligned else
+                "固定止损止盈，达到TP前不加仓，连续两笔亏损后暂停。"
+            ),
+        },
+    }
+
+
+def _to_bool(v: str | None) -> bool:
+    return str(v or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _should_call_ai(current: Snapshot, previous: Snapshot | None) -> tuple[bool, str]:
+    """在节省 token 与实时性之间做平衡的触发器。"""
+    now = time.time()
+    elapsed = now - _last_ai_call_time
+
+    if previous is None:
+        return True, "first snapshot"
+    if elapsed >= AI_FORCE_INTERVAL:
+        return True, f"force interval reached ({elapsed:.1f}s)"
+    if elapsed < AI_CALL_MIN_INTERVAL:
+        return False, f"min interval guard ({elapsed:.1f}s<{AI_CALL_MIN_INTERVAL:.1f}s)"
+
+    prev_ts = previous.candles_m1[-1].ts if previous.candles_m1 else ""
+    curr_ts = current.candles_m1[-1].ts if current.candles_m1 else ""
+    if curr_ts and curr_ts != prev_ts:
+        return True, "new M1 candle"
+
+    prev_mid = (previous.bid + previous.ask) / 2 if (previous.bid > 0 and previous.ask > 0) else 0.0
+    curr_mid = (current.bid + current.ask) / 2 if (current.bid > 0 and current.ask > 0) else 0.0
+    if prev_mid > 0 and curr_mid > 0:
+        move_bps = abs(curr_mid - prev_mid) / prev_mid * 10000
+        if move_bps >= AI_TRIGGER_PRICE_BPS:
+            return True, f"price move {move_bps:.2f} bps"
+
+    if len(current.positions) != len(previous.positions):
+        return True, "position count changed"
+
+    return False, "no meaningful market change"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -438,30 +535,40 @@ async def _call_anthropic(client: httpx.AsyncClient, prompt_json: str) -> TradeC
     return _normalize_trade_command(text)
 
 
-async def _call_gemini(client: httpx.AsyncClient, prompt_json: str) -> TradeCommand:
-    body = {
-        "contents": [{"role": "user", "parts": [{"text": prompt_json}]}],
-        "generationConfig": {"responseMimeType": "application/json"},
-    }
-    path = GEMINI_PATH_TEMPLATE.format(model=AI_MODEL)
-    url  = f"{AI_BASE_URL.rstrip('/')}{path}?key={AI_API_KEY}"
-    resp = await client.post(url, json=body)
-    resp.raise_for_status()
-    candidates = resp.json().get("candidates", [])
-    parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
-    text  = "\n".join(p.get("text", "") for p in parts)
-    return _normalize_trade_command(text)
+def _call_gemini_sync(prompt_json: str) -> TradeCommand:
+    http_options = None
+    if GEMINI_PROXY_URL:
+        http_options = genai_types.HttpOptions(
+            client_args={"transport": httpx.HTTPTransport(proxy=GEMINI_PROXY_URL)},
+            async_client_args={"transport": httpx.AsyncHTTPTransport(proxy=GEMINI_PROXY_URL)},
+        )
+
+    use_vertex = _to_bool(os.getenv("GOOGLE_GENAI_USE_VERTEXAI"))
+    if use_vertex:
+        client = genai.Client(http_options=http_options)
+    else:
+        client = genai.Client(api_key=AI_API_KEY, http_options=http_options)
+    response = client.models.generate_content(
+        model=AI_MODEL,
+        contents=prompt_json,
+        config=genai_types.GenerateContentConfig(response_mime_type="application/json"),
+    )
+    return _normalize_trade_command(response.text or "")
 
 
-async def _call_ai(snapshot: Snapshot, user_message: str = "") -> TradeCommand:
+async def _call_gemini(_client: httpx.AsyncClient, prompt_json: str) -> TradeCommand:
+    return await asyncio.to_thread(_call_gemini_sync, prompt_json)
+
+
+async def _call_ai(snapshot: Snapshot, user_message: str = "", force_call: bool = False) -> TradeCommand:
     global _last_ai_call_time
 
-    if not AI_API_KEY:
+    if AI_PROVIDER in {"openai", "openai_compatible", "deepseek", "moonshot", "qwen", "siliconflow", "anthropic"} and not AI_API_KEY:
         return TradeCommand(action="none", reason="AI_API_KEY missing")
 
     now     = time.time()
     elapsed = now - _last_ai_call_time
-    if elapsed < AI_CALL_MIN_INTERVAL:
+    if (not force_call) and elapsed < AI_CALL_MIN_INTERVAL:
         wait = AI_CALL_MIN_INTERVAL - elapsed
         logger.info("Rate limit guard: skip AI, next in %.1fs", wait)
         return TradeCommand(action="none", reason=f"Rate limit guard, retry in {wait:.0f}s")
@@ -525,6 +632,7 @@ async def get_mode(x_api_key: str | None = Header(default=None)):
 @app.post("/v1/mt5/ingest")
 async def ingest(snapshot: Snapshot, x_api_key: str | None = Header(default=None)):
     _auth(x_api_key)
+    previous_snapshot = runtime.last_snapshot
     runtime.last_snapshot = snapshot
 
     logger.info(
@@ -536,11 +644,24 @@ async def ingest(snapshot: Snapshot, x_api_key: str | None = Header(default=None
     )
 
     if runtime.mode == "kernel":
-        cmd = await _call_ai(snapshot)
+        # 有持仓时，每次都强制让AI做一次仓位扫描与管理决策
+        if snapshot.positions:
+            should_call, reason = True, "position management pass"
+        else:
+            should_call, reason = _should_call_ai(snapshot, previous_snapshot)
+        if should_call:
+            cmd = await _call_ai(
+                snapshot,
+                user_message="Kernel ingest pass: scan current positions and manage them dynamically before new entries.",
+                force_call=bool(snapshot.positions),
+            )
+            runtime.next_command = cmd
+        else:
+            cmd = TradeCommand(action="none", reason=f"AI skipped: {reason}")
     else:
         cmd = TradeCommand(action="none", reason="User mode: no auto-trading")
+        runtime.next_command = cmd
 
-    runtime.next_command = cmd
     _persist_state()
     return {"ok": True, "mode": runtime.mode, "command": cmd}
 
@@ -630,12 +751,25 @@ async def chat(req: ChatReq):
     snapshot = runtime.last_snapshot
     if snapshot is None:
         return {"answer": "尚未收到 MT5 数据，请先启动 EA。"}
-    cmd = await _call_ai(snapshot, req.message)
+    force_trade = runtime.mode == "kernel" and _is_force_trade_request(req.message)
+    cmd = await _call_ai(snapshot, req.message, force_call=force_trade)
     mtf = _multi_tf_analysis(snapshot)
+    explain = _build_trade_explanation(snapshot, cmd)
+
+    if force_trade and cmd.action != "none":
+        runtime.next_command = cmd
+        _persist_state()
+
     return {
         "mode":     runtime.mode,
         "answer":   f"建议动作: {cmd.action}, 手数: {cmd.volume}, SL: {cmd.sl}, TP: {cmd.tp}\n原因: {cmd.reason}",
         "command":  cmd,
+        "force_trade_requested": force_trade,
+        "queued_for_execution": force_trade and cmd.action != "none",
+        "decision_logic": explain["decision_logic"],
+        "win_rate_estimate": explain["win_rate_estimate"],
+        "historical_win_rate": explain["historical_win_rate"],
+        "position_management_plan": explain["position_management_plan"],
         "multi_tf": mtf,
         "provider": AI_PROVIDER,
     }
