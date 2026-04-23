@@ -63,11 +63,11 @@ curl -X POST http://127.0.0.1:8000/v1/agent/mode \
   -d '{"mode":"user","reason":"manual supervision"}'
 ```
 
-## 4) AI 接入（支持多厂商）
+## 4) AI 接入（默认 Gemini，仍支持多厂商）
 Python 侧支持三类：
-1. `openai_compatible`：兼容 OpenAI Chat Completions 的全系网关（OpenAI、DeepSeek、Qwen兼容网关、Moonshot兼容网关等）
+1. `gemini`：原生 Google Gemini API（默认）
 2. `anthropic`：原生 Claude Messages API
-3. `gemini`：原生 Google Gemini API
+3. `openai_compatible`：兼容 OpenAI Chat Completions 的全系网关（OpenAI、DeepSeek、Qwen兼容网关、Moonshot兼容网关等）
 
 在 `.env` 配置：
 - `AI_PROVIDER=openai_compatible|anthropic|gemini`
@@ -90,12 +90,20 @@ AI_API_KEY=xxx
 AI_MODEL=claude-3-7-sonnet-latest
 ```
 
-示例（Gemini 原生）：
+默认示例（Gemini 原生）：
 ```bash
 AI_PROVIDER=gemini
 AI_BASE_URL=https://generativelanguage.googleapis.com
 AI_API_KEY=xxx
-AI_MODEL=gemini-2.5-pro
+AI_MODEL=gemini-2.5-flash
+GEMINI_PROXY_URL=http://127.0.0.1:7897
+```
+
+Vertex AI 模式（可不填 `AI_API_KEY`）：
+```bash
+export GOOGLE_CLOUD_PROJECT=810669871257
+export GOOGLE_CLOUD_LOCATION=global
+export GOOGLE_GENAI_USE_VERTEXAI=True
 ```
 
 示例（DeepSeek OpenAI兼容）：

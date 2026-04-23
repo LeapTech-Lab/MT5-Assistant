@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -14,6 +15,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from google import genai
+from google.genai import types as genai_types
 from pydantic import BaseModel, Field, field_validator
 
 load_dotenv()
@@ -25,14 +28,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 # Config
 # ─────────────────────────────────────────────────────────────
 API_KEY              = os.getenv("BRIDGE_API_KEY", "change_me")
-AI_PROVIDER          = os.getenv("AI_PROVIDER", "openai_compatible").lower()
-AI_BASE_URL          = os.getenv("AI_BASE_URL", "https://api.openai.com/v1")
+AI_PROVIDER          = os.getenv("AI_PROVIDER", "gemini").lower()
+AI_BASE_URL          = os.getenv("AI_BASE_URL", "https://generativelanguage.googleapis.com")
 AI_API_KEY           = os.getenv("AI_API_KEY", "")
-AI_MODEL             = os.getenv("AI_MODEL", "gpt-4.1-mini")
+AI_MODEL             = os.getenv("AI_MODEL", "gemini-2.5-flash")
 AI_TIMEOUT_SECONDS   = int(os.getenv("AI_TIMEOUT_SECONDS", "30"))
 OPENAI_PATH          = os.getenv("OPENAI_PATH", "/chat/completions")
 ANTHROPIC_VERSION    = os.getenv("ANTHROPIC_VERSION", "2023-06-01")
 GEMINI_PATH_TEMPLATE = os.getenv("GEMINI_PATH_TEMPLATE", "/v1beta/models/{model}:generateContent")
+GEMINI_PROXY_URL     = os.getenv("GEMINI_PROXY_URL", "").strip()
 MAX_RISK_PERCENT     = float(os.getenv("MAX_RISK_PERCENT", "1.0"))
 DEFAULT_AGENT_MODE   = os.getenv("DEFAULT_AGENT_MODE", "user")
 AI_CALL_MIN_INTERVAL = float(os.getenv("AI_CALL_MIN_INTERVAL", "10"))
@@ -438,25 +442,31 @@ async def _call_anthropic(client: httpx.AsyncClient, prompt_json: str) -> TradeC
     return _normalize_trade_command(text)
 
 
-async def _call_gemini(client: httpx.AsyncClient, prompt_json: str) -> TradeCommand:
-    body = {
-        "contents": [{"role": "user", "parts": [{"text": prompt_json}]}],
-        "generationConfig": {"responseMimeType": "application/json"},
-    }
-    path = GEMINI_PATH_TEMPLATE.format(model=AI_MODEL)
-    url  = f"{AI_BASE_URL.rstrip('/')}{path}?key={AI_API_KEY}"
-    resp = await client.post(url, json=body)
-    resp.raise_for_status()
-    candidates = resp.json().get("candidates", [])
-    parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
-    text  = "\n".join(p.get("text", "") for p in parts)
-    return _normalize_trade_command(text)
+def _call_gemini_sync(prompt_json: str) -> TradeCommand:
+    http_options = None
+    if GEMINI_PROXY_URL:
+        http_options = genai_types.HttpOptions(
+            client_args={"transport": httpx.HTTPTransport(proxy=GEMINI_PROXY_URL)},
+            async_client_args={"transport": httpx.AsyncHTTPTransport(proxy=GEMINI_PROXY_URL)},
+        )
+
+    client = genai.Client(api_key=AI_API_KEY, http_options=http_options)
+    response = client.models.generate_content(
+        model=AI_MODEL,
+        contents=prompt_json,
+        config=genai_types.GenerateContentConfig(response_mime_type="application/json"),
+    )
+    return _normalize_trade_command(response.text or "")
+
+
+async def _call_gemini(_client: httpx.AsyncClient, prompt_json: str) -> TradeCommand:
+    return await asyncio.to_thread(_call_gemini_sync, prompt_json)
 
 
 async def _call_ai(snapshot: Snapshot, user_message: str = "") -> TradeCommand:
     global _last_ai_call_time
 
-    if not AI_API_KEY:
+    if AI_PROVIDER in {"openai", "openai_compatible", "deepseek", "moonshot", "qwen", "siliconflow", "anthropic"} and not AI_API_KEY:
         return TradeCommand(action="none", reason="AI_API_KEY missing")
 
     now     = time.time()
