@@ -167,6 +167,7 @@ class TradeCommand(BaseModel):
     action: Literal[
         "none", "buy_market", "sell_market",
         "buy_limit", "sell_limit", "buy_stop", "sell_stop",
+        "close_all", "modify_all_sl_tp",
     ] = "none"
     volume: float = 0.01
     sl: float = 0.0
@@ -327,6 +328,14 @@ def _multi_tf_analysis(snapshot: Snapshot) -> dict:
 def _risk_guard(snapshot: Snapshot, cmd: TradeCommand) -> TradeCommand:
     if cmd.action == "none":
         return cmd
+    if cmd.action == "close_all":
+        return cmd
+    if cmd.action == "modify_all_sl_tp":
+        if cmd.sl <= 0 or cmd.tp <= 0:
+            return TradeCommand(action="none", reason="modify_all_sl_tp requires SL/TP")
+        if not snapshot.positions:
+            return TradeCommand(action="none", reason="No positions to modify")
+        return cmd
     if cmd.volume < 0.01:
         cmd.volume = 0.01
     if cmd.sl <= 0 or cmd.tp <= 0:
@@ -393,6 +402,10 @@ def _build_ai_payload(snapshot: Snapshot, user_message: str = "") -> dict:
             "You are a professional crypto trading AI for {symbol}. "
             "Analyze the multi-timeframe data: use H1 for trend direction, "
             "M15 for structure, M5 for entry timing, M1 for precise entry. "
+            "On EVERY call, you must scan all existing positions first. "
+            "If positions are open, prioritize position management: "
+            "you may return modify_all_sl_tp to dynamically adjust stop-loss/take-profit, "
+            "or close_all when risk becomes unclear or market invalidates the thesis. "
             "Review the trade history to learn from past wins and losses. "
             "Only trade when H1 and M15 agree on direction. "
             "Always provide SL and TP. Reply ONLY with a JSON object matching the schema."
@@ -631,9 +644,17 @@ async def ingest(snapshot: Snapshot, x_api_key: str | None = Header(default=None
     )
 
     if runtime.mode == "kernel":
-        should_call, reason = _should_call_ai(snapshot, previous_snapshot)
+        # 有持仓时，每次都强制让AI做一次仓位扫描与管理决策
+        if snapshot.positions:
+            should_call, reason = True, "position management pass"
+        else:
+            should_call, reason = _should_call_ai(snapshot, previous_snapshot)
         if should_call:
-            cmd = await _call_ai(snapshot)
+            cmd = await _call_ai(
+                snapshot,
+                user_message="Kernel ingest pass: scan current positions and manage them dynamically before new entries.",
+                force_call=bool(snapshot.positions),
+            )
             runtime.next_command = cmd
         else:
             cmd = TradeCommand(action="none", reason=f"AI skipped: {reason}")
