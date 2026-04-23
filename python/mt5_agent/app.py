@@ -204,7 +204,7 @@ class TradeRecord(BaseModel):
 
 class ChatReq(BaseModel):
     message: str
-    symbol: str = "BTCUSD"
+    symbol: str = "XAUUSD"
 
 
 class ModeUpdateReq(BaseModel):
@@ -775,6 +775,21 @@ def _call_gemini_sync(prompt_json: str) -> TradeCommand:
 async def _call_gemini(_client: httpx.AsyncClient, prompt_json: str) -> TradeCommand:
     return await asyncio.to_thread(_call_gemini_sync, prompt_json)
 
+    use_vertex = _to_bool(os.getenv("GOOGLE_GENAI_USE_VERTEXAI"))
+    if use_vertex:
+        client = genai.Client(http_options=http_options)
+    else:
+        client = genai.Client(api_key=AI_API_KEY, http_options=http_options)
+    response = client.models.generate_content(
+        model=AI_MODEL,
+        contents=prompt_json,
+        config=genai_types.GenerateContentConfig(response_mime_type="application/json"),
+    )
+    return _normalize_trade_command(response.text or "")
+
+
+async def _call_gemini(_client: httpx.AsyncClient, prompt_json: str) -> TradeCommand:
+    return await asyncio.to_thread(_call_gemini_sync, prompt_json)
 
 async def _call_ai(snapshot: Snapshot, user_message: str = "", force_call: bool = False) -> TradeCommand:
     global _last_ai_call_time
