@@ -77,6 +77,7 @@ Python 侧支持三类：
 - `AI_CALL_MIN_INTERVAL`（最小调用间隔，默认 10 秒）
 - `AI_FORCE_INTERVAL`（最长强制调用间隔，默认 60 秒）
 - `AI_TRIGGER_PRICE_BPS`（价格触发阈值，默认 1.5 bps）
+- `RISK_CONTRACT_MULTIPLIER`（风险估算合约系数，默认 1.0）
 
 常用 `AI_MODEL` 示例：
 - OpenAI: `gpt-4.1-mini` / `gpt-4.1` / `o4-mini`
@@ -187,6 +188,7 @@ curl -X POST "http://127.0.0.1:8000/v1/chat" \
 - 返回结构化指令 `command`（含 action/volume/sl/tp）
 - 返回 `decision_logic`、`win_rate_estimate`、`position_management_plan`
 - 若指令可执行，会自动写入 `next-command` 队列，EA 可直接拉取执行
+- 若 AI 返回 `none`，会启用“强制下单兜底”（最小仓位+保守SL/TP），尽量避免“必须下单但被拒绝”
 
 典型返回字段：
 - `answer`：自然语言建议

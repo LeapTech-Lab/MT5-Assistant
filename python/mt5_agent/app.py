@@ -43,6 +43,7 @@ AI_CALL_MIN_INTERVAL = float(os.getenv("AI_CALL_MIN_INTERVAL", "10"))
 AI_FORCE_INTERVAL    = float(os.getenv("AI_FORCE_INTERVAL", "60"))
 AI_TRIGGER_PRICE_BPS = float(os.getenv("AI_TRIGGER_PRICE_BPS", "1.5"))
 REVIEW_EVERY_N_TRADES = int(os.getenv("REVIEW_EVERY_N_TRADES", "10"))
+RISK_CONTRACT_MULTIPLIER = float(os.getenv("RISK_CONTRACT_MULTIPLIER", "1.0"))
 
 # 历史交易最多回传给AI的条数
 TRADE_HISTORY_FOR_AI = int(os.getenv("TRADE_HISTORY_FOR_AI", "20"))
@@ -448,7 +449,16 @@ def _risk_guard(snapshot: Snapshot, cmd: TradeCommand) -> TradeCommand:
     account_equity = 10000.0
     max_loss = account_equity * (MAX_RISK_PERCENT / 100)
     ref_price = cmd.price if cmd.price > 0 else snapshot.bid
-    if abs(ref_price - cmd.sl) * cmd.volume * 100 > max_loss:
+    distance = abs(ref_price - cmd.sl)
+    risk_value = distance * cmd.volume * RISK_CONTRACT_MULTIPLIER
+    if risk_value > max_loss:
+        # 自动缩小手数，尽量不直接拒单
+        if distance > 0:
+            allowed_volume = max_loss / (distance * RISK_CONTRACT_MULTIPLIER)
+            if allowed_volume >= 0.01:
+                cmd.volume = round(allowed_volume, 2)
+                cmd.reason = f"{cmd.reason} | volume auto-adjusted by risk guard".strip(" |")
+                return cmd
         return TradeCommand(action="none", reason="Risk too large")
     return cmd
 
@@ -524,8 +534,35 @@ def _build_ai_payload(snapshot: Snapshot, user_message: str = "") -> dict:
 
 def _is_force_trade_request(message: str) -> bool:
     text = (message or "").lower()
-    keywords = ["立即下单", "立即开仓", "马上开仓", "market now", "open now", "buy now", "sell now"]
+    keywords = [
+        "立即下单", "立即开仓", "马上开仓", "马上下单", "当前必须下单", "必须下单",
+        "market now", "open now", "buy now", "sell now",
+    ]
     return any(k in text for k in keywords)
+
+
+def _force_trade_fallback(snapshot: Snapshot) -> TradeCommand:
+    """强制下单场景的兜底指令：极小仓位 + 保守SL/TP，降低被拒概率。"""
+    mtf = _multi_tf_analysis(snapshot)
+    up_votes = sum(1 for tf in ("m1", "m5", "m15", "h1") if mtf[tf].get("trend") == "up")
+    down_votes = sum(1 for tf in ("m1", "m5", "m15", "h1") if mtf[tf].get("trend") == "down")
+    is_buy = up_votes >= down_votes
+
+    entry = snapshot.ask if is_buy else snapshot.bid
+    spread = max(snapshot.ask - snapshot.bid, entry * 0.0001)
+    sl_distance = max(entry * 0.0012, spread * 20)   # ~0.12%
+    tp_distance = sl_distance * 1.2
+    sl = entry - sl_distance if is_buy else entry + sl_distance
+    tp = entry + tp_distance if is_buy else entry - tp_distance
+
+    return TradeCommand(
+        action="buy_market" if is_buy else "sell_market",
+        volume=0.01,
+        price=entry,
+        sl=sl,
+        tp=tp,
+        reason="force-trade fallback: minimal-risk execution",
+    )
 
 
 def _build_trade_explanation(snapshot: Snapshot, cmd: TradeCommand) -> dict:
@@ -868,6 +905,8 @@ async def chat(req: ChatReq):
         return {"answer": "尚未收到 MT5 数据，请先启动 EA。"}
     force_trade = runtime.mode == "kernel" and _is_force_trade_request(req.message)
     cmd = await _call_ai(snapshot, req.message, force_call=force_trade)
+    if force_trade and cmd.action == "none":
+        cmd = _risk_guard(snapshot, _force_trade_fallback(snapshot))
     mtf = _multi_tf_analysis(snapshot)
     explain = _build_trade_explanation(snapshot, cmd)
 
