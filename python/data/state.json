@@ -1,5 +1,5 @@
 {
-  "last_update": "2026-04-18T06:24:37.116882+00:00",
+  "last_update": "2026-04-23T09:00:51.649112+00:00",
   "mode": "kernel",
   "next_command": {
     "action": "none",
@@ -7,7 +7,7 @@
     "sl": 0.0,
     "tp": 0.0,
     "price": 0.0,
-    "reason": "H1 and M15 both bearish; existing 6 long positions already exposed against trend. No new entries; manage risk on open longs."
+    "reason": "Command consumed"
   },
-  "last_symbol": "BTCUSD"
+  "last_symbol": "XAUUSD"
 }
