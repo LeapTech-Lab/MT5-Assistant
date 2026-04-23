@@ -179,6 +179,7 @@ void ExecuteCommandIfAny(string raw)
    HttpPost("/v1/mt5/order-result", result);
 }
 
+<<<<<<< HEAD
 bool PM_CloseAllPositions(string symbol)
 {
    bool ok_all = true;
@@ -303,6 +304,8 @@ bool PM_ModifyAllPositionsSLTP(string symbol, double sl, double tp)
    return ok_all;
 }
 
+=======
+>>>>>>> be720be (update)
 //---
 
 
