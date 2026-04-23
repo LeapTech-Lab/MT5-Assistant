@@ -47,7 +47,6 @@ string BuildCandlesJson(string symbol, ENUM_TIMEFRAMES tf, int bars, int digits)
    string out = "[";
    for(int i = copied - 1; i >= 0; i--)
    {
-      // 用短字段名 t/o/h/l/c/v 减少payload大小
       out += StringFormat(
          "{\"t\":\"%s\",\"o\":%.*f,\"h\":%.*f,\"l\":%.*f,\"c\":%.*f,\"v\":%d}",
          TimeToString(rates[i].time, TIME_DATE|TIME_SECONDS),
@@ -241,7 +240,70 @@ bool PM_ModifyAllPositionsSLTP(string symbol, double sl, double tp)
    return ok_all;
 }
 
-// ── HTTP ─────────────────────────────────────────────────────────
+// ── 仓位管理函数（只保留一份） ─────────────────────────────────────
+bool PM_CloseAllPositions(string symbol)
+{
+   bool ok_all = true;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL) != symbol) continue;
+      long ptype = PositionGetInteger(POSITION_TYPE);
+      double vol = PositionGetDouble(POSITION_VOLUME);
+      if(vol <= 0) continue;
+
+      MqlTradeRequest req; MqlTradeResult res;
+      ZeroMemory(req); ZeroMemory(res);
+      req.action = TRADE_ACTION_DEAL;
+      req.symbol = symbol;
+      req.position = ticket;
+      req.volume = vol;
+      req.deviation = 20;
+      req.magic = 808888;
+      req.type_filling = ORDER_FILLING_IOC;
+
+      if(ptype == POSITION_TYPE_BUY)
+      {
+         req.type = ORDER_TYPE_SELL;
+         req.price = SymbolInfoDouble(symbol, SYMBOL_BID);
+      }
+      else
+      {
+         req.type = ORDER_TYPE_BUY;
+         req.price = SymbolInfoDouble(symbol, SYMBOL_ASK);
+      }
+
+      bool ok = OrderSend(req, res);
+      if(!ok) ok_all = false;
+   }
+   return ok_all;
+}
+
+bool PM_ModifyAllPositionsSLTP(string symbol, double sl, double tp)
+{
+   bool ok_all = true;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL) != symbol) continue;
+
+      MqlTradeRequest req; MqlTradeResult res;
+      ZeroMemory(req); ZeroMemory(res);
+      req.action = TRADE_ACTION_SLTP;
+      req.symbol = symbol;
+      req.position = ticket;
+      req.sl = sl;
+      req.tp = tp;
+
+      bool ok = OrderSend(req, res);
+      if(!ok) ok_all = false;
+   }
+   return ok_all;
+}
+
+// ── HTTP 函数 ─────────────────────────────────────────────────────
 string HttpPost(string path, string body)
 {
    uchar result[], data[];

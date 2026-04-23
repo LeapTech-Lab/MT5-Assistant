@@ -1,0 +1,36 @@
+{
+  "symbol": "XAUUSD",
+  "latest_momentum_10_bps": 3.627,
+  "trade_count": 24,
+  "quote_count": 119,
+  "candidates": [
+    {
+      "id": "mom_long_XAUUSD",
+      "type": "momentum_long",
+      "params": {
+        "entry_mom_bps": 4.0,
+        "hold_bars": 10
+      },
+      "status": "testing",
+      "evaluation": {
+        "trades": 23,
+        "win_rate": 0.435,
+        "avg_bps": -0.236
+      }
+    },
+    {
+      "id": "mom_short_XAUUSD",
+      "type": "momentum_short",
+      "params": {
+        "entry_mom_bps": 4.0,
+        "hold_bars": 10
+      },
+      "status": "testing",
+      "evaluation": {
+        "trades": 11,
+        "win_rate": 0.091,
+        "avg_bps": -5.356
+      }
+    }
+  ]
+}

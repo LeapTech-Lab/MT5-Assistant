@@ -207,7 +207,7 @@ class TradeRecord(BaseModel):
 
 class ChatReq(BaseModel):
     message: str
-    symbol: str = "BTCUSD"
+    symbol: str = "XAUUSD"
 
 
 class ModeUpdateReq(BaseModel):
